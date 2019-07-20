@@ -1,16 +1,16 @@
-/*
- * fat.h
- *
- *  Created on: 
- *      Author: Administrator
+/**
+ * 本源码配套的课程为 - 从0到1动手写FAT32文件系统。每个例程对应一个课时，尽可能注释。
+ * 作者：李述铜
+ * 课程网址：http://01ketang.cc
+ * 版权声明：本源码非开源，二次开发，或其它商用前请联系作者。
  */
-
 #ifndef XFAT_H
 #define XFAT_H
 
 #include "xtypes.h"
 #include "xdisk.h"
-#include "xcluster.h"
+#include "xfat_obj.h"
+#include "xlib.h"
 
 #pragma pack(1)
 
@@ -64,8 +64,6 @@ typedef struct _dbr_t {
 #define CLUSTER_INVALID                 0x0FFFFFFF          // 无效的簇号
 #define CLUSTER_FREE                    0x00                // 空闲的cluster
 #define FILE_DEFAULT_CLUSTER            0x00                // 文件的缺省簇号
-#define CLUSTER_FIRST_FREE              0x02                // 首个可用的簇号
-#define CLUSTER_WIDTH                   4                  // 一个簇的表示字节宽
 
 #define DIRITEM_NAME_FREE               0xE5                // 目录项空闲名标记
 #define DIRITEM_NAME_END                0x00                // 目录项结束名标记
@@ -82,6 +80,11 @@ typedef struct _dbr_t {
 #define DIRITEM_ATTR_DIRECTORY          0x10                // 目录项属性：目录
 #define DIRITEM_ATTR_ARCHIVE            0x20                // 目录项属性：归档
 #define DIRITEM_ATTR_LONG_NAME          0x0F                // 目录项属性：长文件名
+
+#define DIRITEM_GET_FREE        (1 << 0)
+#define DIRITEM_GET_USED        (1 << 2)
+#define DIRITEM_GET_END         (1 << 3)
+#define DIRITEM_GET_ALL         0xff
 
 /**
  * FAT目录项的日期类型
@@ -105,8 +108,7 @@ typedef struct _diritem_time_t {
  * FAT目录项
  */
 typedef struct _diritem_t {
-    u8_t DIR_Name[8];                   // 文件名
-    u8_t DIR_ExtName[3];                // 扩展名
+    u8_t DIR_Name[11];                  // 8+3文件名
     u8_t DIR_Attr;                      // 属性
     u8_t DIR_NTRes;
     u8_t DIR_CrtTimeTeenth;             // 创建时间的毫秒
@@ -146,39 +148,34 @@ typedef struct _fsinto_t {
 
 #pragma pack()
 
-#define XFAT_CLUSTER_FREE_CHAIN_SIZE     2       // FAT簇链缓冲大小
-#define XFAT_CLUSTER_WORK_CHAIN_SIZE     2       // FAT簇链缓冲大小
-#define XFILE_CLUSTER_CHAIN_SIZE    2       // 文件簇链缓冲大小
-#define XFILE_CLUSTER_PRELOAD_SIZE  1       // 打开文件时，建议预加载的簇数量
-#define XDIR_CLUSTER_PRELOAD_SIZE   2       // 打开目录时，建议预加载的簇数量
-#define XFAT_CLUSTER_PRELOAD_SIZE   0       // 挂载FAT时，建议预加载的簇数量
+#define XFAT_NAME_LEN       16
 
 /**
  * xfat结构
  */
 typedef struct _xfat_t {
-#define XFAT_NAME_LEN       16
-    char name[XFAT_NAME_LEN];           // XFAT名称
+    xfat_obj_t obj;
 
-    // FAT相关的分区参数
+    char name[XFAT_NAME_LEN];           // XFAT名称
     u32_t fat_start_sector;             // FAT表起始扇区
     u32_t fat_tbl_nr;                   // FAT表数量
     u32_t fat_tbl_sectors;              // 每个FAT表的扇区数
     u32_t sec_per_cluster;              // 每簇的扇区数
-    u32_t root_cluster;                 // 根目录的扇区数
+    u32_t root_cluster;                 // 根目录的扇区号
     u32_t cluster_byte_size;            // 每簇字节数
     u32_t total_sectors;                // 总扇区数
 
-    u8_t * fat_buffer;                  // FAT表项缓冲
-
-    xcluster_chain_t free_chain;        // FAT空闲簇链
-    xcluster_item_t free_items[XFAT_CLUSTER_FREE_CHAIN_SIZE];    // 簇链空闲缓存项
-    xcluster_chain_t work_chain;        // FAT工作簇链
-    xcluster_item_t work_items[XFAT_CLUSTER_WORK_CHAIN_SIZE];    // 簇链工作缓存项
+    u32_t fsi_sector;                   // fsi表的扇区号
+    u32_t backup_sector;                // 备份扇区
+    u32_t cluster_next_free;            // 下一可用的簇(建议值)
+    u32_t cluster_total_free;           // 总的空闲簇数量(建议值)
 
     xdisk_part_t * disk_part;           // 对应的分区信息
 
-    struct _xfat_t * next;
+    xfat_bpool_t bpool;                 // FAT缓存：用于非文件数据的访问
+
+    struct _xfat_t* next;
+
 } xfat_t;
 
 /**
@@ -191,7 +188,6 @@ typedef struct _xfile_time_t {
     u8_t hour;
     u8_t minute;
     u8_t second;
-    u16_t mil_second;
 }xfile_time_t;
 
 /**
@@ -233,40 +229,41 @@ typedef struct _xfileinfo_t {
  * 文件类型
  */
 typedef struct _xfile_t {
+    xfat_obj_t obj;
+
     xfat_t *xfat;                   // 对应的xfat结构
 
     u32_t size;                     // 文件大小
     u16_t attr;                     // 文件属性
     xfile_type_t type;              // 文件类型
     u32_t pos;                      // 当前位置
-    xfat_err_t err;                 // 上一次的操作错误码
+    xfat_err_t err;                  // 上一次的操作错误码
 
     u32_t start_cluster;            // 数据区起始簇号
     u32_t curr_cluster;             // 当前簇号
     u32_t dir_cluster;              // 所在的根目录的描述项起始簇号
     u32_t dir_cluster_offset;       // 所在的根目录的描述项的簇偏移
 
-    xcluster_chain_t cluster_chain;     // FAT簇链
-    xcluster_item_t cluster_items[XFILE_CLUSTER_CHAIN_SIZE];    // 簇链缓存项
+    xfat_bpool_t bpool;             // 文件数据缓存
 } xfile_t;
 
 /**
  * 文件seek的定位类型
  */
 typedef enum _xfile_orgin_t {
-    XFS_SEEK_SET,                    // 文件开头
-    XFS_SEEK_CUR,                    // 当前位置
-    XFS_SEEK_END,                    // 文件结尾
+    XFAT_SEEK_SET,                    // 文件开头
+    XFAT_SEEK_CUR,                    // 当前位置
+    XFAT_SEEK_END,                    // 文件结尾
 }xfile_orgin_t;
 
 /**
  * 文件修改的时间类型
  */
-typedef enum _xfat_acctime_t {
-    XFS_TIME_ATIME,                  // 修改访问时间
-    XFS_TIME_CTIME,                  // 修改创建时间
-    XFS_TIME_MTIME,                  // 修改修改时间
-}xfat_acctime_t;
+typedef enum _stime_type_t {
+    XFAT_TIME_ATIME,                  // 修改访问时间
+    XFAT_TIME_CTIME,                  // 修改创建时间
+    XFAT_TIME_MTIME,                  // 修改修改时间
+}stime_type_t;
 
 /**
  * 簇大小枚举类型
@@ -282,11 +279,9 @@ typedef enum _xcluster_size_t {
 
     XFAT_CLUSTER_AUTO,              // 内部自动选择
 }xcluster_size_t;
-
 typedef struct _xfat_fmt_ctrl_t {
     xfs_type_t type;                // 文件系统类型
     xcluster_size_t cluster_size;
-
     const char * vol_name;          // 磁盘卷标
 }xfat_fmt_ctrl_t;
 
@@ -298,15 +293,12 @@ typedef struct _xfat_fmt_info_t {
     u8_t media;
     u32_t fat_sectors;
     u32_t rsvd_sectors;
-
     u32_t root_cluster;
     u16_t sec_per_cluster;
 
     u32_t backup_sector;
     u32_t fsinfo_sector;
 }xfat_fmt_info_t;
-
-typedef xfat_err_t (*fs_accdir_func_t)(xfat_t *xfat, diritem_t * dir_item, void * arg1, void * arg2);
 
 u32_t cluster_fist_sector(xfat_t *xfat, u32_t cluster_no);
 xfat_err_t is_cluster_valid(u32_t cluster);
@@ -316,14 +308,14 @@ xfat_err_t read_cluster(xfat_t *xfat, u8_t *buffer, u32_t cluster, u32_t count);
 xfat_err_t xfat_init(void);
 xfat_err_t xfat_mount(xfat_t * xfat, xdisk_part_t * xdisk_part, const char * mount_name);
 void xfat_unmount(xfat_t * xfat);
+xfat_err_t xfat_set_buf(xfat_t * xfat, u8_t * buf, u32_t size);
 
 xfat_err_t xfat_fmt_ctrl_init(xfat_fmt_ctrl_t * ctrl);
 xfat_err_t xfat_format (xdisk_part_t * xdisk_part, xfat_fmt_ctrl_t * ctrl);
 
 xfat_err_t xfile_open(xfile_t *file, const char *path);
-xfat_err_t xfile_open_sub(xfile_t * file, xfile_t * sub_file, const char * sub_path);
+xfat_err_t xfile_open_sub(xfile_t* dir, const char* sub_path, xfile_t* sub_file);
 xfat_err_t xfile_close(xfile_t *file);
-xfat_err_t xfile_flush(xfile_t * file);
 xfat_err_t xdir_first_file(xfile_t *file, xfileinfo_t *info);
 xfat_err_t xdir_next_file(xfile_t *file, xfileinfo_t *info);
 xfat_err_t xfile_error(xfile_t * file);
@@ -333,6 +325,7 @@ xfat_err_t xfile_mkdir (const char * path);
 xfat_err_t xfile_mkfile (const char * path);
 xfat_err_t xfile_rmfile (const char * path);
 xfat_err_t xfile_rmdir (const char * path);
+xfat_err_t xfile_rmdir_tree(const char* path);
 xfile_size_t xfile_read(void * buffer, xfile_size_t elem_size, xfile_size_t count, xfile_t * file);
 xfile_size_t xfile_write(void * buffer, xfile_size_t elem_size, xfile_size_t count, xfile_t * file);
 
@@ -347,5 +340,7 @@ xfat_err_t xfile_rename(const char * path, const char * new_name);
 xfat_err_t xfile_set_atime (const char * path, xfile_time_t * time);
 xfat_err_t xfile_set_mtime (const char * path, xfile_time_t * time);
 xfat_err_t xfile_set_ctime (const char * path, xfile_time_t * time);
+
+xfat_err_t xfile_set_buf(xfile_t * file, u8_t * buf, u32_t size);
 
 #endif /* XFAT_H */

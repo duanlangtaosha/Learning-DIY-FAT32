@@ -65,6 +65,5 @@ c504：为什么写入后要及时flush
 c501：最小的文件大小和最大的文件大小
 
 bug:
-rm_tree: dir_cluster标注, get_next_item有问题
 get_dir_cluster标注
 多声道处理

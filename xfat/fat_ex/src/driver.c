@@ -1,18 +1,14 @@
-//
-// Created by lishutong on 2019-02-01.
-//
+/**
+ * 本源码配套的课程为 - 从0到1动手写FAT32文件系统。每个例程对应一个课时，尽可能注释。
+ * 作者：李述铜
+ * 课程网址：http://01ketang.cc
+ * 版权声明：本源码非开源，二次开发，或其它商用前请联系作者。
+ */
 #include <stdio.h>
 #include <time.h>
 #include "xdisk.h"
 #include "xfat.h"
 
-void test (void) {
-    xfat_err_t err = FS_ERR_OK;
-
-    while ((err = xfile_read(buf, 32, 1, file)) == FS_ERR_OK) {
-        .......
-    }
-}
 /**
  * 初始化磁盘设备
  * @param disk 初始化的设备
@@ -62,13 +58,13 @@ static xfat_err_t xdisk_hw_read_sector(xdisk_t *disk, u8_t *buffer, u32_t start_
 
     int err = fseek(file, offset, SEEK_SET);
     if (err == -1) {
-        printf("seek disk failed:%s - 0x%x\n", disk->name, (int)offset);
+        printf("seek disk failed:0x%x\n", (int)offset);
         return FS_ERR_IO;
     }
 
-    int read_count = fread(buffer, disk->sector_size, count, file);
-    if (read_count < count) {
-        printf("read disk failed:%s - sector:%d, count:%d\n", disk->name, (int)start_sector, (int)count);
+    err = (int)fread(buffer, disk->sector_size, count, file);
+    if (err == -1) {
+        printf("read disk failed:sector:%d, count:%d\n",(int)start_sector, (int)count);
         return FS_ERR_IO;
     }
     return FS_ERR_OK;
@@ -88,13 +84,13 @@ static xfat_err_t xdisk_hw_write_sector(xdisk_t *disk, u8_t *buffer, u32_t start
 
     int err = fseek(file, offset, SEEK_SET);
     if (err == -1) {
-        printf("seek disk failed:%s - 0x%x\n", disk->name, (int)offset);
+        printf("seek disk failed: 0x%x\n", (int)offset);
         return FS_ERR_IO;
     }
 
-    int write_count = fwrite(buffer, disk->sector_size, count, file);
-    if (write_count < count) {
-        printf("write disk failed:%s - sector:%d, count:%d\n", disk->name, (int)start_sector, (int)count);
+    err = (int)fwrite(buffer, disk->sector_size, count, file);
+    if (err == -1) {
+        printf("write disk failed:sector:%d, count:%d\n",(int)start_sector, (int)count);
         return FS_ERR_IO;
     }
 
@@ -123,7 +119,6 @@ static xfat_err_t xdisk_hw_curr_time(xdisk_t *disk, xfile_time_t *timeinfo) {
     timeinfo->hour = local_time->tm_hour;
     timeinfo->minute = local_time->tm_min;
     timeinfo->second = local_time->tm_sec;
-    timeinfo->mil_second = 0;
 
     return FS_ERR_OK;
 }

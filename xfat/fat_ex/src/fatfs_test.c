@@ -1,12 +1,18 @@
-
+/**
+ * 本源码配套的课程为 - 从0到1动手写FAT32文件系统。每个例程对应一个课时，尽可能注释。
+ * 作者：李述铜
+ * 课程网址：http://01ketang.cc
+ * 版权声明：本源码非开源，二次开发，或其它商用前请联系作者。
+ */
 #include <stdio.h>
+#include <stdlib.h>
 #include "xdisk.h"
 #include "xfat.h"
 
 extern xdisk_driver_t vdisk_driver;
 
-const char * disk_path_test = "../disk_test.img";
-const char * disk_path = "../disk.img";
+const char * disk_path_test = "disk_test.img";
+const char * disk_path = "disk.img";
 
 static u32_t write_buffer[160*1024];
 static u32_t read_buffer[160*1024];
@@ -16,104 +22,75 @@ xdisk_part_t disk_part;
 xfat_t xfat;
 
 // 磁盘缓存读写测试
-int disk_buf_test(xdisk_t * disk, int buf_nr) {
+int disk_buf_test(xdisk_t* disk, int buf_nr) {
     xfat_err_t err;
-    xdisk_buf_t * disk_buf;
+    xfat_buf_t* disk_buf;
     int i;
 
     // 连续读写测试，全部使用缓存
     for (i = 0; i < buf_nr; i++) {
-        err = xdisk_buf_read_sector(disk, &disk_buf, i);
-        if (err < 0) return err;
+        err = xfat_bpool_read_sector(&disk->obj, &disk_buf, i);
+		xlib_abort(err < 0);
 
-        memset(disk_buf->buf, i, disk->sector_size);
+        xlib_memset(disk_buf->buf, i, disk->sector_size);
 
-        err = xdisk_buf_write_sector(disk, disk_buf, i);
-        if (err < 0) return err;
-
-        err = xdisk_release_buf(disk, disk_buf);
-        if (err < 0) return err;
-    }
+        err = xfat_bpool_write_sector(&disk->obj, disk_buf, 0);
+		xlib_abort(err < 0);
+	}
 
     for (i = 0; i < buf_nr; i++) {
-        err = xdisk_buf_read_sector(disk, &disk_buf, i);
-        if (err < 0) return err;
+        err = xfat_bpool_read_sector(&disk->obj, &disk_buf, i);
+		xlib_abort(err < 0);
 
-        memset(disk_buf->buf, i, disk->sector_size);
+        xlib_memset(disk_buf->buf, i, disk->sector_size);
 
-        err = xdisk_buf_write_sector(disk, disk_buf, i);
-        if (err < 0) return err;
+        err = xfat_bpool_write_sector(&disk->obj, disk_buf, 0);
+		xlib_abort(err < 0);
+	}
 
-        err = xdisk_release_buf(disk, disk_buf);
-        if (err < 0) return err;
-    }
     for (i = 0; i < buf_nr; i++) {
-        err = xdisk_buf_read_sector(disk, &disk_buf, i + buf_nr);
-        if (err < 0) return err;
+        err = xfat_bpool_read_sector(&disk->obj, &disk_buf, i + buf_nr);
+		xlib_abort(err < 0);
 
-        memset(disk_buf->buf, i + buf_nr, disk->sector_size);
+        xlib_memset(disk_buf->buf, i + buf_nr, disk->sector_size);
 
-        err = xdisk_buf_write_sector(disk, disk_buf, i + buf_nr);
-        if (err < 0) return err;
+        err = xfat_bpool_write_sector(&disk->obj, disk_buf, 0);
+		xlib_abort(err < 0);
+	}
 
-        err = xdisk_release_buf(disk, disk_buf);
-        if (err < 0) return err;
-    }
-
-    xdisk_flush_all(disk);
+    xfat_bpool_flush(&disk->obj);
 
     return 0;
 }
 
 // io测试，测试通过要注意关掉
 int disk_io_test (void) {
-    int i, err;
+    int err;
     xdisk_t disk_test;
 
 #define DISK_BUF_NR     3
-    static u8_t disk_buf[DISK_BUF_SIZE(512, DISK_BUF_NR)];
+    static u8_t disk_buf[XFAT_BUF_SIZE(512, DISK_BUF_NR)];
 
-    disk_test.driver = &vdisk_driver;
-    disk_test.sector_size = 512;
+    xlib_memset(read_buffer, 0, sizeof(read_buffer));
 
-    memset(read_buffer, 0, sizeof(read_buffer));
-
-    err = xdisk_open(&disk_test, "vidsk_test", &vdisk_driver, (void *)disk_path_test, disk_buf, sizeof(disk_buf));
-    if (err) {
-        printf("open disk failed!\n");
-        return -1;
-    }
+    err = xdisk_open(&disk_test, "vidsk_test", &vdisk_driver, (void*)disk_path_test, disk_buf, sizeof(disk_buf));
+	xlib_abort(err < 0, "open disk failed!");
 
     err = xdisk_write_sector(&disk_test, (u8_t *)write_buffer, 0, 2);
-    if (err) {
-        printf("disk write failed!\n");
-        return -1;
-    }
+	xlib_abort(err < 0, "disk write failed!");
 
     err = xdisk_read_sector(&disk_test, (u8_t *)read_buffer, 0, 2);
-    if (err) {
-        printf("disk read failed!\n");
-        return -1;
-    }
+	xlib_abort(err < 0, "disk read failed!");
 
-    err = memcmp((u8_t *)read_buffer, (u8_t *)write_buffer, disk_test.sector_size * 2);
-    if (err != 0) {
-        printf("data no equal!\n");
-        return -1;
-    }
+    err = xlib_memcmp((u8_t *)read_buffer, (u8_t *)write_buffer, (size_t)disk_test.sector_size * 2);
+	xlib_abort(err != 0, "data not equal!");
 
     // 磁盘缓存读写测试
     err = disk_buf_test(&disk_test, DISK_BUF_NR);
-    if (err < 0) {
-        printf("disk cache test failed!\n");
-        return -1;
-    }
+	xlib_abort(err < 0, "disk cache test failed!");
 
     err = xdisk_close(&disk_test);
-    if (err) {
-        printf("disk close failed!\n");
-        return -1;
-    }
+	xlib_abort(err < 0, "disk close failed!");
 
     printf("disk io test ok!\n");
     return 0;
@@ -126,21 +103,16 @@ int disk_part_test (void) {
     printf("partition read test...\n");
 
     err = xdisk_get_part_count(&disk, &count);
-    if (err < 0) {
-        printf("partion count detect failed!\n");
-        return err;
-    }
-    printf("partition count:%d\n", count);
+	xlib_abort(err < 0, "partion count detect failed!");
+
+	printf("partition count:%d\n", count);
 
 	for (i = 0; i < count; i++) {
 		xdisk_part_t part;
 		int err;
 
 		err = xdisk_get_part(&disk, &part, i);
-		if (err == -1) {
-			printf("read partion in failed:%d\n", i);
-			return -1;
-		}
+		xlib_abort(err < 0, "read partion in failed!");
 
         printf("no %d: start: %d, count: %d, capacity:%.0f M\n",
                i, part.start_sector, part.total_sector,
@@ -154,8 +126,8 @@ void show_dir_info (diritem_t * diritem) {
     u8_t attr = diritem->DIR_Attr;
 
     // name
-    memset(file_name, 0, sizeof(file_name));
-    memcpy(file_name, diritem->DIR_Name, 11);
+    xlib_memset(file_name, 0, sizeof(file_name));
+    xlib_memcpy(file_name, diritem->DIR_Name, 11);
     if (file_name[0] == 0x05) {
         file_name[0] = 0xE5;
     }
@@ -217,19 +189,17 @@ int fat_dir_test(void) {
     printf("root dir read test...\n");
 
     culster_buffer = (u8_t *)malloc(xfat.cluster_byte_size);
+	xlib_abort(culster_buffer == (u8_t*)0, "malloc failed!");
 
     // 解析根目录所在的簇
     curr_cluster = xfat.root_cluster;
     while (is_cluster_valid(curr_cluster)) {
         err = read_cluster(&xfat, culster_buffer, curr_cluster, 1);
-        if (err) {
-            printf("read cluster %d failed\n", curr_cluster);
-            return -1;
-        }
+		xlib_abort(err < 0, "read cluster %d failed\n", curr_cluster);
 
         dir_item = (diritem_t *)culster_buffer;
-        for (j = 0; j < xfat.cluster_byte_size / sizeof(diritem_t); j++) {
-            u8_t  * name = (u8_t *)(dir_item[j].DIR_Name);
+        for (j = 0; j < xfat.cluster_byte_size / sizeof(diritem_t); j++, dir_item++) {
+            u8_t  * name = dir_item->DIR_Name;
             if (name[0] == DIRITEM_NAME_FREE) {
                 continue;
             } else if (name[0] == DIRITEM_NAME_END) {
@@ -242,10 +212,7 @@ int fat_dir_test(void) {
         }
 
         err = get_next_cluster(&xfat, curr_cluster, &curr_cluster);
-        if (err) {
-            printf("get next cluster failed， current cluster %d\n", curr_cluster);
-            return -1;
-        }
+		xlib_abort(err < 0, "get next cluster failed， current cluster %d\n", curr_cluster);
     }
 
     return 0;
@@ -260,15 +227,13 @@ int fat_file_test(void) {
     printf("root dir read test...\n");
 
     culster_buffer = (u8_t *)malloc(xfat.cluster_byte_size + 1);
+	xlib_abort(culster_buffer == (u8_t*)0, "malloc failed!");
 
     // 从fat_dir_test选择1个文件的cluster起始号，根据测试情况修改
-    curr_cluster = 11459;
+    curr_cluster = 4565;    // 62.txt
     while (is_cluster_valid(curr_cluster)) {
         err = read_cluster(&xfat, culster_buffer, curr_cluster, 1);
-        if (err) {
-            printf("read cluster %d failed\n", curr_cluster);
-            return -1;
-        }
+		xlib_abort(err < 0, "read cluster %d failed!", curr_cluster);
 
         // print file content
         culster_buffer[xfat.cluster_byte_size + 1] = '\0';
@@ -276,10 +241,7 @@ int fat_file_test(void) {
 
         size += xfat.cluster_byte_size;
         err = get_next_cluster(&xfat, curr_cluster, &curr_cluster);
-        if (err) {
-            printf("get next cluster failed， current cluster %d\n", curr_cluster);
-            return -1;
-        }
+		xlib_abort(err < 0, "get next cluster failed， current cluster %d\n", curr_cluster);
     }
 
     printf("\nfile size:%d\n", size);
@@ -337,7 +299,7 @@ int list_sub_files (xfile_t * file, int curr_depth) {
             }
             printf("%s\n", fileinfo.file_name);
 
-            err = xfile_open_sub(file, &sub_file, fileinfo.file_name);
+            err = xfile_open_sub(file, fileinfo.file_name, &sub_file);
             if (err < 0) {
                 return err;
             }
@@ -366,7 +328,7 @@ int dir_trans_test(void) {
     printf("\ntrans dir test!\n");
 
     // 仅遍历根目录下面的这一层
-    err = xfile_open(&top_dir, "/mp0");
+    err = xfile_open(&top_dir, "/mp0/read/..");
     if (err < 0) {
         printf("open directory failed!\n");
         return -1;
@@ -387,6 +349,8 @@ int dir_trans_test(void) {
         return -1;
     }
 
+    printf("\ntry to list all sub files!\n");
+
     err = list_sub_files(&top_dir, 0);
     if (err < 0) {
         printf("list file failed!\n");
@@ -403,10 +367,11 @@ int dir_trans_test(void) {
     return 0;
 }
 
-int file_read_all_test(const char * path, xfile_size_t elem_size,  xfile_size_t e_count) {
+int file_read_and_check(const char * path, xfile_size_t elem_size,  xfile_size_t e_count) {
     xfile_t file;
     xfile_size_t readed_count;
     xfile_size_t curr_offset = 0;
+    static u8_t file_buf[XFAT_BUF_SIZE(512, 4)];
 
     xfat_err_t err = xfile_open(&file, path);
     if (err != FS_ERR_OK) {
@@ -414,18 +379,18 @@ int file_read_all_test(const char * path, xfile_size_t elem_size,  xfile_size_t 
         return -1;
     }
 
-    while ((readed_count = xfile_read(read_buffer, elem_size, e_count, &file)) > 0) {
+    xfile_set_buf(&file, file_buf, sizeof(file_buf));
+
+    if ((readed_count = xfile_read(read_buffer, elem_size, e_count, &file)) > 0) {
         u32_t i = 0;
-        u32_t num_start = curr_offset / 4;       // 起始数值
-        u32_t bytes_count = readed_count * elem_size;    // 总的字节数
+        u32_t num_start = (u32_t)curr_offset / 4;       // 起始数值
+        xfile_size_t bytes_count = readed_count * elem_size;    // 总的字节数
         for (i = 0; i < bytes_count; i += 4) {
             if (read_buffer[i / 4] != num_start++) {
                 printf("read file failed!\n");
                 return -1;
             }
         }
-
-        curr_offset += bytes_count;
     }
 
     if (xfile_error(&file) < 0) {
@@ -433,59 +398,60 @@ int file_read_all_test(const char * path, xfile_size_t elem_size,  xfile_size_t 
         return -1;
     }
 
+    xfile_close(&file);
+
     return FS_ERR_OK;
 }
 
 int fs_read_test (void) {
     const char * file_0b_path = "/mp0/read/0b.bin";
-    const char * file_1MB_path = "/mp0/read/1MB.bin";
-    xfile_t file_bin;
+    const char * file_1MB_path = "/mp0/read/1MB.bin";   // 从0x00000000~0x0003FFFF的二进制文件
     xfat_err_t err;
 
     printf("\nfile read test!\n");
 
-    memset(read_buffer, 0, sizeof(read_buffer));
-    err = file_read_all_test(file_0b_path, 32, 1);
+    xlib_memset(read_buffer, 0, sizeof(read_buffer));
+    err = file_read_and_check(file_0b_path, 32, 1);
     if (err < 0) {
         printf("read failed!");
         return -1;
     }
 
     // 不超过一个扇区的读取
-    memset(read_buffer, 0, sizeof(read_buffer));
-    err = file_read_all_test(file_1MB_path, disk.sector_size - 32, 2);
+    xlib_memset(read_buffer, 0, sizeof(read_buffer));
+    err = file_read_and_check(file_1MB_path, disk.sector_size - 32, 1);
     if (err < 0) {
         printf("read failed!");
         return -1;
     }
 
     // 刚好一个扇区的读取
-    memset(read_buffer, 0, sizeof(read_buffer));
-    err = file_read_all_test(file_1MB_path, disk.sector_size, 2);
+    xlib_memset(read_buffer, 0, sizeof(read_buffer));
+    err = file_read_and_check(file_1MB_path, disk.sector_size, 1);
     if (err < 0) {
         printf("read failed!");
         return -1;
     }
 
     // 跨扇区的读取
-    memset(read_buffer, 0, sizeof(read_buffer));
-    err = file_read_all_test(file_1MB_path, disk.sector_size + 14, 2);
+    xlib_memset(read_buffer, 0, sizeof(read_buffer));
+    err = file_read_and_check(file_1MB_path, disk.sector_size + 14, 1);
     if (err < 0) {
         printf("read failed!");
         return -1;
     }
 
     // 刚好超过一个簇的读取
-    memset(read_buffer, 0, sizeof(read_buffer));
-    err = file_read_all_test(file_1MB_path, xfat.cluster_byte_size + 32, 2);
+    xlib_memset(read_buffer, 0, sizeof(read_buffer));
+    err = file_read_and_check(file_1MB_path, xfat.cluster_byte_size + 32, 1);
     if (err < 0) {
         printf("read failed!");
         return -1;
     }
 
     // 跨多个簇的读取
-    memset(read_buffer, 0, sizeof(read_buffer));
-    err = file_read_all_test(file_1MB_path, 2 * xfat.cluster_byte_size + 32, 2);
+    xlib_memset(read_buffer, 0, sizeof(read_buffer));
+    err = file_read_and_check(file_1MB_path, 2 * xfat.cluster_byte_size + 32, 1);
     if (err < 0) {
         printf("read failed!");
         return -1;
@@ -497,25 +463,28 @@ int fs_read_test (void) {
 
 int _fs_seek_test(xfile_t * file, xfile_orgin_t orgin, xfile_ssize_t offset) {
     int err = 0;
-    u32_t target_pos;
-    int count,  value;
+    xfile_ssize_t target_pos;
+    u32_t count;
 
     switch (orgin) {
-        case XFS_SEEK_SET:
+        case XFAT_SEEK_SET:
             target_pos = offset;
             break;
-        case XFS_SEEK_END:
+        case XFAT_SEEK_END:
             target_pos = file->size + offset;
             break;
-        case XFS_SEEK_CUR:
+        case XFAT_SEEK_CUR:
             target_pos = file->pos + offset;
+            break;
+        default:
+            target_pos = 0;
             break;
     }
 
     err = xfile_seek(file, offset, orgin);
     if (err) {
         printf("seek error\n");
-        return err;
+        return -1;
     }
 
     if (xfile_tell(file) != target_pos) {
@@ -523,31 +492,13 @@ int _fs_seek_test(xfile_t * file, xfile_orgin_t orgin, xfile_ssize_t offset) {
         return -1;
     }
 
-    switch (target_pos % 4) {
-        case 0:
-            value = target_pos / 4;
-            break;
-        case 1:
-            value = target_pos / 4;
-            value = (value >> 8) | ((value + 1) << 24);
-            break;
-        case 2:
-            value = target_pos / 4;
-            value = (value >> 16) | ((value + 1) << 16);
-            break;
-        case 3:
-            value = target_pos / 4;
-            value = (value >> 24) | ((value + 1) << 8);
-            break;
-    }
-
-    count = xfile_read(read_buffer, 4, 1, file);
+    count = xfile_read(read_buffer, 1, 1, file);
     if (count < 1) {
         printf("seek error\n");
-        return err;
+        return -1;
     }
 
-    if (*(u32_t *)read_buffer != value){
+    if (*(u8_t *)read_buffer != (target_pos % 256)){
         printf("seek error\n");
         return -1;
     }
@@ -566,39 +517,41 @@ int fs_seek_test(void) {
         return -1;
     }
 
-    err = _fs_seek_test(&file, XFS_SEEK_SET, 32);
+    err = _fs_seek_test(&file, XFAT_SEEK_SET, 32);
     if (err) return err;
-    err = _fs_seek_test(&file, XFS_SEEK_SET, 576);
+    err = _fs_seek_test(&file, XFAT_SEEK_SET, 576);
     if (err) return err;
-    err = _fs_seek_test(&file, XFS_SEEK_SET, 4193);
+    err = _fs_seek_test(&file, XFAT_SEEK_SET, 4193);
     if (err) return err;
-    err = _fs_seek_test(&file, XFS_SEEK_SET, -1);
+    err = _fs_seek_test(&file, XFAT_SEEK_SET, -1);
     if (err == FS_ERR_OK) return -1;
 
-    err = _fs_seek_test(&file, XFS_SEEK_CUR, 32);
+    err = _fs_seek_test(&file, XFAT_SEEK_CUR, 32);
     if (err) return err;
-    err = _fs_seek_test(&file, XFS_SEEK_CUR, 576);
+    err = _fs_seek_test(&file, XFAT_SEEK_CUR, 576);
     if (err) return err;
-    err = _fs_seek_test(&file, XFS_SEEK_CUR, 4193);
+    err = _fs_seek_test(&file, XFAT_SEEK_CUR, 4193);
     if (err) return err;
-    err = _fs_seek_test(&file, XFS_SEEK_CUR, -32);
+    err = _fs_seek_test(&file, XFAT_SEEK_CUR, -32);
     if (err) return err;
-    err = _fs_seek_test(&file, XFS_SEEK_CUR, -512);
+    err = _fs_seek_test(&file, XFAT_SEEK_CUR, -512);
     if (err) return err;
-    err = _fs_seek_test(&file, XFS_SEEK_CUR, -1024);
+    err = _fs_seek_test(&file, XFAT_SEEK_CUR, -1024);
     if (err) return err;
-    err = _fs_seek_test(&file, XFS_SEEK_CUR, -0xFFFFFFF);
-    if (err == FS_ERR_OK) return err;
+    err = _fs_seek_test(&file, XFAT_SEEK_CUR, -0xFFFFFFF);
+    if (err == FS_ERR_OK) return -1;
 
-    err = _fs_seek_test(&file, XFS_SEEK_END, -32);
+    err = _fs_seek_test(&file, XFAT_SEEK_END, -32);
     if (err) return err;
-    err = _fs_seek_test(&file, XFS_SEEK_END, -576);
+    err = _fs_seek_test(&file, XFAT_SEEK_END, -576);
     if (err) return err;
-    err = _fs_seek_test(&file, XFS_SEEK_END, -4193);
+    err = _fs_seek_test(&file, XFAT_SEEK_END, -4193);
     if (err) return err;
-    err = _fs_seek_test(&file, XFS_SEEK_END, 32);
-    if (err == FS_ERR_OK) return err;
+    err = _fs_seek_test(&file, XFAT_SEEK_END, 32);
+    if (err == FS_ERR_OK) return -1;
 
+    xfile_close(&file);
+    printf("all seek test ok!\n");
     return 0;
 }
 
@@ -614,7 +567,7 @@ int fs_open_test (void) {
 
     err = xfile_open(&file, "/mp0");
     if (err) {
-        printf("open file failed %s!\n", "/");
+        printf("open file failed %s!\n", "/mp0");
         return -1;
     }
     xfile_close(&file);
@@ -708,7 +661,6 @@ xfat_err_t fs_modify_file_test(void) {
     timeinfo.hour = 13;
     timeinfo.minute = 32;
     timeinfo.second = 12;
-    timeinfo.mil_second = 20;
     err = xfile_set_atime(curr_path, &timeinfo);
     if (err < 0) {
         printf("set acc time failed!\n");
@@ -721,7 +673,6 @@ xfat_err_t fs_modify_file_test(void) {
     timeinfo.hour = 14;
     timeinfo.minute = 33;
     timeinfo.second = 13;
-    timeinfo.mil_second = 21;
     err = xfile_set_mtime(curr_path, &timeinfo);
     if (err < 0) {
         printf("set modify time failed!\n");
@@ -734,7 +685,6 @@ xfat_err_t fs_modify_file_test(void) {
     timeinfo.hour = 15;
     timeinfo.minute = 35;
     timeinfo.second = 14;
-    timeinfo.mil_second = 22;
     err = xfile_set_ctime(curr_path, &timeinfo);
     if (err < 0) {
         printf("set create time failed!\n");
@@ -758,7 +708,7 @@ xfat_err_t fs_modify_file_test(void) {
 }
 
 int file_write_test(const char * path, u32_t elem_size, u32_t elem_count, u32_t write_count) {
-    int i, j;
+    u32_t i, j;
     xfat_err_t err;
     xfile_t file;
 
@@ -770,6 +720,8 @@ int file_write_test(const char * path, u32_t elem_size, u32_t elem_count, u32_t 
 
     // 连续多次测试写入
     for (i = 0; i < write_count; i++) {
+        u32_t end;
+
         // 从预先指定的write_buffer中取出数据写入文件
         err = xfile_write(write_buffer, elem_size, elem_count, &file);
         if (err < 0) {
@@ -778,21 +730,22 @@ int file_write_test(const char * path, u32_t elem_size, u32_t elem_count, u32_t 
         }
 
         // 再定位到文件开始处
-        err = xfile_seek(&file, -(xfile_ssize_t)(elem_size * elem_count), XFS_SEEK_CUR);
+        err = xfile_seek(&file, -(xfile_ssize_t)((u64_t)elem_size * elem_count), XFAT_SEEK_CUR);
         if (err < 0) {
             printf("seek failed\n");
             return err;
         }
 
         // 读取比较，检查是否完全写入
-        memset(read_buffer, 0, sizeof(read_buffer));
+        xlib_memset(read_buffer, 0, sizeof(read_buffer));
         err = xfile_read(read_buffer, elem_size, elem_count, &file);
         if (err < 0) {
             printf("read failed\n");
             return err;
         }
 
-        for (j = 0; j < elem_size * elem_count / sizeof(u32_t); j++) {
+        end = (u64_t)elem_size * elem_count / sizeof(u32_t);
+        for (j = 0; j < end; j++) {
             if (read_buffer[j] != j) {
                 printf("content different!\n");
                 return -1;
@@ -851,26 +804,24 @@ int fs_write_test (void) {
     // 扩容写测试
     do {
         xfile_t file;
-        u32_t elem_size = 3 * xfat.cluster_byte_size + 32;
-        u32_t elem_count = 2;
-        u32_t write_count = sizeof(write_buffer) / elem_count / elem_size;  // 注意，调整写入使得可全部写入
-        xfile_size_t size = elem_size * elem_count * write_count;
+        xfile_size_t size = sizeof(write_buffer);
         xfile_size_t file_size;
         u32_t i;
 
         printf("\n expand write file!\n");
 
-        sprintf(file_path, "%s%s", dir_path, "32KB.bin");
-        err = file_write_test(file_path, elem_size, elem_count, write_count);     // 超过多个簇，且非扇区边界对齐的写
-        if (err < 0) {
-            printf("write file failed!\n");
-            return err;
-        }
+        sprintf(file_path, "%s%s", dir_path, "1KB.bin");
 
         // 检查文件写入后大小
         err = xfile_open(&file, file_path);
         if (err < 0) {
             printf("Open failed:%s\n", file_path);
+            return err;
+        }
+
+        err = xfile_write(write_buffer, size, 1, &file);
+        if (err < 0) {
+            printf("Write failed:%s\n", file_path);
             return err;
         }
 
@@ -880,22 +831,23 @@ int fs_write_test (void) {
             return err;
         }
 
+		err = xfile_seek(&file, 0, XFAT_SEEK_SET);
+		if (err < 0) {
+			return err;
+		}
+
+        xlib_memset(read_buffer, 0, sizeof(read_buffer));
+        err = xfile_read(read_buffer, size, 1, &file);
+        if (err < 0) {
+            printf("read failed\n");
+            return err;
+        }
+
         // 检查文件内容
-        for (i = 0; i < write_count; i++) {
-            u32_t j;
-
-            memset(read_buffer, 0, sizeof(read_buffer));
-            err = xfile_read(read_buffer, elem_size, elem_count, &file);
-            if (err < 0) {
-                printf("read failed\n");
-                return err;
-            }
-
-            for (j = 0; j < elem_size * elem_count / sizeof(u32_t); j++) {
-                if (read_buffer[j] != j) {
-                    printf("content different!\n");
-                    return -1;
-                }
+        for (i = 0; i < size / sizeof(read_buffer[0]); i++) {
+            if (read_buffer[i] != write_buffer[i]) {
+                printf("content different!\n");
+                return -1;
             }
         }
 
@@ -912,10 +864,11 @@ xfat_err_t fs_create_test (void) {
     const char * dir_path = "/mp0/create/c0/c1/c2/c3/c4/c5/c6/c7/c8/c9";  // 这个路径可配置短一些
     char path[256];
     int i, j;
+    xfile_t file;
 
     printf("create test\n");
 
-    // 注意，如果目录下已经有要创建的文件
+    // 注意，如果根目录下已经有要创建的文件
     // 或者之前在调试该代码时，已经执行了一部分导致部分文件被创建时
     // 注意在重启调试前，先清除干净根目录下的所有这些文件
     // 如果懒得清除，可以更改要创建的文件名
@@ -924,7 +877,7 @@ xfat_err_t fs_create_test (void) {
         printf("no %d:create dir %s\n", i, dir_path);
         err = xfile_mkdir(dir_path);
         if (err < 0) {
-            if ((err == FS_ERR_EXISTED) && (i >= 1)) {
+            if (err == FS_ERR_EXISTED) {
                 // 只有在第一次创建时才会成功
                 printf("dir exist %s, continue.\n", dir_path);
             } else {
@@ -940,7 +893,7 @@ xfat_err_t fs_create_test (void) {
 
             err = xfile_mkfile(path);
             if (err < 0) {
-                if ((err == FS_ERR_EXISTED) && (i >= 1)) {
+                if (err == FS_ERR_EXISTED) {
                     // 只有在第一次创建时才会成功
                     printf("file exist %s, continue.\n", path);
                 } else {
@@ -959,31 +912,33 @@ xfat_err_t fs_create_test (void) {
         }
     }
 
+    // 这里肯定会写失败
     err = xfile_rmdir(dir_path);
-    if (err != FS_ERR_NOT_EMPTY) {
+    if (err == FS_ERR_OK) {
         printf("rm dir failed!\n");
         return -1;
     }
 
-    for (i = 0; i < 3; i++) {
-        for (j = 0; j < 50; j++) {
-            // 创建文件
-            sprintf(path, "%s/b%d.txt", dir_path, j);
-            printf("no %d:rm file %s\n", i, path);
+    printf("begin remove file\n");
+    for (j = 0; j < 50; j++) {
+        sprintf(path, "%s/b%d.txt", dir_path, j);
+        printf("rm file %s\n", path);
 
-            err = xfile_rmfile(path);
-            if (err < 0) {
-                if ((err == FS_ERR_NONE) && (i >= 1)) {
-                    // 只有在第一次创建时才会成功
-                    printf("file not exist %s, continue.\n", path);
-                } else {
-                    printf("rm file failed %s\n", path);
-                    return err;
-                }
-            }
+        err = xfile_rmfile(path);
+        if (err < 0) {
+            printf("rm file failed %s\n", path);
+            return err;
         }
     }
 
+    err = xfile_open(&file, dir_path);
+    if (err < 0) return err;
+    err = list_sub_files(&file, 0);
+    if (err < 0) return err;
+    err = xfile_close(&file);
+    if (err < 0) return err;
+
+    // 这里应该会成功
     err = xfile_rmdir(dir_path);
     if (err != FS_ERR_OK) {
         printf("rm dir failed!\n");
@@ -994,10 +949,42 @@ xfat_err_t fs_create_test (void) {
     return FS_ERR_OK;
 }
 
+xfat_err_t fs_rmdir_tree_test(void) {
+    xfat_err_t err = FS_ERR_OK;
+    const char* dir_path = "/mp0/rmtree/c0/c1/c2/c3/c4/c5/c6/c7/c8/c9";  // 这个路径可配置短一些
+    xfile_t file;
+
+    printf("fs_rmdir_tree_test test\n");
+
+    printf("create dir %s\n", dir_path);
+    err = xfile_mkdir(dir_path);
+    if (err && (err != FS_ERR_EXISTED))  return err;
+
+    err = xfile_open(&file, "/mp0/rmtree");
+    if (err < 0) return err;
+    err = list_sub_files(&file, 0);
+    if (err < 0) return err;
+    err = xfile_close(&file);
+    if (err < 0) return err;
+
+    err = xfile_rmdir_tree("/mp0/rmtree/c0");
+    if (err) return err;
+
+    err = xfile_open(&file, "/mp0/rmtree");
+    if (err < 0) return err;
+    err = list_sub_files(&file, 0);
+    if (err < 0) return err;
+    err = xfile_close(&file);
+    if (err < 0) return err;
+
+    printf("fs_rmdir_tree_test ok\n");
+
+    return FS_ERR_OK;
+}
 xfat_err_t fs_resize_test (void) {
     xfile_t file;
     xfat_err_t err;
-    u32_t i, offset = 0x2000;
+    u32_t offset = 0x2000;
     xfile_size_t file_size;
 
     const char * path = "/mp0/resize/file.txt";
@@ -1021,7 +1008,7 @@ xfat_err_t fs_resize_test (void) {
         return err;
     }
 
-    err = xfile_seek(&file, 32, SEEK_SET);
+    err = xfile_seek(&file, 0, SEEK_SET);
     if (err < 0) {
         printf("seek file failed!\n");
         return err;
@@ -1029,10 +1016,10 @@ xfat_err_t fs_resize_test (void) {
 
     if (xfile_write(write_buffer, sizeof(write_buffer), 1, &file) == 0) {
         printf("write file failed!\n");
-        return err;
+        return -1;
     }
 
-    // 缩小文件 
+    // 缩小文件
     err = xfile_resize(&file, offset);
     if (err < 0) {
         printf("resize file failed!\n");
@@ -1047,17 +1034,17 @@ xfat_err_t fs_resize_test (void) {
 
     if (xfile_write(write_buffer, sizeof(write_buffer), 1, &file) == 0) {
         printf("write file failed!\n");
-        return err;
+        return -1;
     }
 
     xfile_size(&file, &file_size);
     if (file_size != (offset + sizeof(write_buffer))) {
-        printf("resize test failed!\n");
-        return err;
+		printf("resize test failed!\n");
+		return err;
     }
 
-    printf("resize test ok\n");
-    return err;
+	printf("resize test ok\n");
+	return err;
 }
 
 xfat_err_t fs_format_test(void) {
@@ -1067,7 +1054,7 @@ xfat_err_t fs_format_test(void) {
 
     // 根据实际情况填写格式化哪个分区
     // 用序号格式化可能差了些
-    err = xdisk_get_part(&disk, &fmt_part, 1);
+    err = xdisk_get_part(&disk, &fmt_part, 2);
     if (err < 0) {
         return err;
     }
@@ -1075,6 +1062,7 @@ xfat_err_t fs_format_test(void) {
     xfat_fmt_ctrl_init(&ctrl);
     ctrl.vol_name = "XFAT DISK";
 
+	ctrl.cluster_size = XFAT_CLUSTER_512B;
     err = xfat_format(&fmt_part, &ctrl);
     if (err < 0) {
         return err;
@@ -1084,40 +1072,57 @@ xfat_err_t fs_format_test(void) {
     return err;
 }
 
-xfat_err_t fs_cluster_load_test(void) {
-    xfat_err_t err;
-    xfile_t file;
-    const char * file_path = "/mp0/clusters/WinHex64.exe";
+int xlib_test(void) {
+	char buf1[32];
+	char buf2[32];
+	char* str1 = "0123456789";
+	char str2[5];
 
-    err = xfile_open(&file, file_path);
-    if (err < 0) {
-        return err;
-    }
+	printf("xlib test begin...\n");
+	
+	xlib_memset(buf1, 0xA5, sizeof(buf1));
+	xlib_memset(buf2, 0x00, sizeof(buf2));
+	xlib_memcpy(buf2, buf1, 10);
+	xlib_assert(buf2[10] != 0xA5);
+	xlib_assert(xlib_memcmp(buf1, buf2, 10) == 0);
+	buf2[2] = 0xA6;
+	xlib_assert(xlib_memcmp(buf1, buf2, 10) < 0);
+	buf2[2] = 0xA4;
+	xlib_assert(xlib_memcmp(buf1, buf2, 10) > 0);
 
-    return err;
+	xlib_strncpy(str2, str1, sizeof(str2));
+	xlib_assert(xlib_strncmp(str2, str1, 5) == 0);
+
+	xlib_assert(xlib_islower('A') == 0);
+	xlib_assert(xlib_islower('a') == 1);
+	xlib_assert(xlib_islower('0') == 0);
+	xlib_assert(xlib_tolower('A') == 'a');
+	xlib_assert(xlib_tolower('a') == 'a');
+	xlib_assert(xlib_toupper('A') == 'A');
+	xlib_assert(xlib_toupper('a') == 'A');
+	xlib_assert(xlib_toupper('0') == '0');
+
+	printf("xlib test ok!\n");
+	return 0;
 }
 
-extern xdisk_driver_t vdisk_driver;
-
 int main (void) {
-    static u8_t disk_buf[DISK_BUF_SIZE(512, 1)];
     xfat_err_t err;
     int i;
+    static u8_t disk_buf[XFAT_BUF_SIZE(512, 4)];
+    static u8_t fat_buf[XFAT_BUF_SIZE(512, 4)];
 
     for (i = 0; i < sizeof(write_buffer) / sizeof(u32_t); i++) {
         write_buffer[i] = i;
     }
 
+	err = xlib_test();
+	if (err) return err;
+
     err = disk_io_test();
     if (err) return err;
 
-    err = xfat_init();
-    if (err < 0) {
-        printf("fat init failed!\n");
-        return -1;
-    }
-
-    err = xdisk_open(&disk, "vidsk", &vdisk_driver, (void *)disk_path, disk_buf, sizeof(disk_buf));
+    err = xdisk_open(&disk, "vidsk", &vdisk_driver, (void*)disk_path, disk_buf, sizeof(disk_buf));
     if (err) {
         printf("open disk failed!\n");
         return -1;
@@ -1132,46 +1137,63 @@ int main (void) {
         return -1;
     }
 
+    err = xfat_init();
+    if (err < 0) {
+        return err;
+    }
+
     err = xfat_mount(&xfat, &disk_part, "mp0");
     if (err == -1) {
         printf("fat init failed!\n");
         return -1;
     }
 
-    //err = fat_dir_test();
-    //if (err) return err;
+    err = xfat_set_buf(&xfat, fat_buf, sizeof(fat_buf));
+    if (err < 0) {
+        printf("set fat buffer failed!\n");
+        return err;
+    }
 
-    //err = fat_file_test();
-    //if (err) return err;
+    err = fat_dir_test();
+    if (err) return err;
 
-    //err = fs_open_test();
-    //if (err) return err;
+    err = fat_file_test();
+    if (err) return err;
 
-    //err = dir_trans_test();
-    //if (err) return err;
+    err = fs_open_test();
+    if (err) return err;
 
-    //err = fs_read_test();
-    //if (err) return err;
+    err = dir_trans_test();
+    if (err) return err;
 
-    //err = fs_seek_test();
-    //if (err) return err;
+    err = fs_read_test();
+    if (err < 0) {
+        printf("read tesst failed");
+        return -1;
+    }
 
-    //err = fs_modify_file_test();
-    //if (err) return err;
+    err = fs_seek_test();
+    if (err) return err;
 
-    //err = fs_write_test();
-    //if (err) return err;
+    err = fs_modify_file_test();
+    if (err) return err;
 
-    //err = fs_create_test();
-    //if (err) return err;
+    err = fs_write_test();
+    if (err) return err;
 
-    //err = fs_resize_test();
-    //if (err) return err;
+    err = fs_create_test();
+    if (err) return err;
 
-//    err = fs_format_test();
-//    if (err) return err;
+    err = fs_rmdir_tree_test();
+    if (err) return err;
 
-    err = fs_cluster_load_test();
+    err = fs_resize_test();
+    if (err) return err;
+
+    // 先umount，再关disk!!!
+    xfat_unmount(&xfat);
+
+    err = fs_format_test();
     if (err) return err;
 
     err = xdisk_close(&disk);

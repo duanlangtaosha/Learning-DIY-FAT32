@@ -1,19 +1,15 @@
-/*
- * disk_io.h
- *
- *      Author: Administrator
+/**
+ * 本源码配套的课程为 - 从0到1动手写FAT32文件系统。每个例程对应一个课时，尽可能注释。
+ * 作者：李述铜
+ * 课程网址：http://01ketang.cc
+ * 版权声明：本源码非开源，二次开发，或其它商用前请联系作者。
  */
 #ifndef XDISK_H
 #define	XDISK_H
 
 #include "xtypes.h"
-#include "xdisk_buf.h"
-
-// 分区活动类型
-enum {
-    BOOT_INACTIVE = 0x00,
-    BOOT_ACTIVE = 0x80,
-};
+#include "xfat_buf.h"
+#include "xfat_obj.h"
 
 /**
  * 文件系统类型
@@ -72,25 +68,18 @@ typedef struct _xdisk_driver_t {
 }xdisk_driver_t;
 
 /**
- * 磁盘分区格式
- */
-typedef enum _part_fmt_t {
-    PART_FMT_MBR,                   // MBR分区格式
-    PART_FMT_NONE,                  // 无分区
-}part_fmt_t;
-
-/**
  * 存储设备类型
  */
 typedef struct _xdisk_t {
-	const char * name;              // 设备名称
-	u32_t sector_size;              // 块大小
+    xfat_obj_t obj;
+
+    const char * name;              // 设备名称
+    u32_t sector_size;              // 块大小
 	u32_t total_sector;             // 总的块数量
     xdisk_driver_t * driver;        // 驱动接口
     void * data;                    // 设备自定义参数
 
-    part_fmt_t part_fmt;            // 分区格式
-	xdisk_buf_pool_t buf_list;		// 磁盘缓存
+    xfat_bpool_t bpool;		        // 磁盘缓存，用于分区访问
 }xdisk_t;
 
 /**
@@ -99,25 +88,20 @@ typedef struct _xdisk_t {
 typedef struct _xdisk_part_t {
 	u32_t start_sector;             // 相对于整个物理存储区开始的块序号
 	u32_t total_sector;             // 总的块数量
+	u32_t relative_sector;          // 相对于逻辑驱动器的扇区号
 	xfs_type_t type;                // 文件系统类型
 	xdisk_t * disk;                 // 对应的存储设备
 }xdisk_part_t;
 
-struct _xfile_t;
-
-xfat_err_t xdisk_open(xdisk_t *disk, const char * name, xdisk_driver_t * driver,
-		void * init_data, u8_t * disk_buf, u32_t buf_size);
+xfat_err_t xdisk_open(xdisk_t* disk, const char* name, xdisk_driver_t* driver,
+    void* init_data, u8_t* disk_buf, u32_t buf_size);
 xfat_err_t xdisk_close(xdisk_t * disk);
 xfat_err_t xdisk_get_part_count(xdisk_t *disk, u32_t *count);
 xfat_err_t xdisk_get_part(xdisk_t *disk, xdisk_part_t *xdisk_part, int part_no);
 xfat_err_t xdisk_curr_time(xdisk_t *disk, struct _xfile_time_t *timeinfo);
 xfat_err_t xdisk_read_sector(xdisk_t *disk, u8_t *buffer, u32_t start_sector, u32_t count);
 xfat_err_t xdisk_write_sector(xdisk_t *disk, u8_t *buffer, u32_t start_sector, u32_t count);
-xfat_err_t xdisk_buf_read_sector(xdisk_t *disk, xdisk_buf_t ** disk_buf, u32_t sector_no);
-xfat_err_t xdisk_buf_write_sector(xdisk_t *disk, xdisk_buf_t * disk_buf, u32_t sector_no);
-xfat_err_t xdisk_alloc_working_buf(xdisk_t * disk, xdisk_buf_t ** disk_buf);
-xfat_err_t xdisk_release_buf(xdisk_t *disk, xdisk_buf_t * disk_buf);
-xfat_err_t xdisk_flush_all(xdisk_t * disk);
+xfat_err_t xdisk_set_part_type(xdisk_part_t * part, xfs_type_t type);
 
 #endif
 
