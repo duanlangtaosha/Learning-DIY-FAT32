@@ -34,6 +34,15 @@ typedef struct _bpb_t {
     u32_t BPB_TotSec32;                 // 总的扇区数
 } bpb_t;
 
+typedef struct _fat12_16_hdr_t {
+    u8_t BS_DrvNum;                     // 设备号
+    u8_t BS_Reserved1;
+    u8_t BS_BootSig;                    // 扩展标记
+    u32_t BS_VolID;                     // 卷序列号
+    u8_t BS_VolLab[11];                 // 卷标名称
+    u8_t BS_FileSysType[8];             // 文件类型名称
+}fat12_16_hdr_t;
+
 /**
  * BPB中的FAT32结构
  */
@@ -58,7 +67,10 @@ typedef struct _fat32_hdr_t {
  */
 typedef struct _dbr_t {
     bpb_t bpb;                          // BPB结构
-    fat32_hdr_t fat32;                  // FAT32结构
+    enum {
+        fat12_16_hdr_t fat12_16;
+        fat32_hdr_t  fat32;             // FAT32结构
+    };
 } dbr_t;
 
 #define CLUSTER_INVALID                 0x0FFFFFFF          // 无效的簇号
@@ -148,7 +160,11 @@ typedef struct _fsinto_t {
 
 #pragma pack()
 
-#define XFAT_NAME_LEN       16
+#define XFAT_NAME_LEN               16
+#define XFAT_FEATURE_FSINFO         (1 << 0)
+#define XFAT_FEATURE_BACKUP         (1 << 1)
+
+#define is_xfat_feature_on(xfat, feature)   ((xfat)->feature) & (feature))
 
 /**
  * xfat结构
@@ -173,6 +189,8 @@ typedef struct _xfat_t {
     xdisk_part_t * disk_part;           // 对应的分区信息
 
     xfat_bpool_t bpool;                 // FAT缓存：用于非文件数据的访问
+
+    u32_t feature;
 
     struct _xfat_t* next;
 

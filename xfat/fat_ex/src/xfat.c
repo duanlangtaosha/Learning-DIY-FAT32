@@ -940,6 +940,25 @@ xfat_err_t xfat_init(void) {
 	return FS_ERR_OK;
 }
 
+static xfs_type_t detect_fstype_by_dbr(dbr_t * dbr) {
+    bpb_t * bpb = dbr->bpb;
+
+    u32_t root_dir_sectors = (bpb->BPB_RootEntCnt * sizeof(diritem_t) + bpb->BPB_BytsPerSec - 1) / bpb->BPB_BytsPerSec;
+    u32_t fat_sectors = bpb->BPB_FATSz16 ? bpb->BPB_FATSz16 : dbr->fat32.BPB_FATSz32;
+    u32_t total_sectors = bpb->BPB_TotSec16 ? bpb->BPB_TotSec16 : bpb->BPB_TotSec32;
+    u32_t data_sectors = total_sectors - (bpb->BPB_RsvdSecCnt + bpb->BPB_NumFATs * fat_sectors) + root_dir_sectors);
+    u32_t cluster_count = data_sectors / bpb->BPB_SecPerClus;
+    if (cluster_count < 4085) {
+        type = FS_FAT12;
+    } else if (cluster_count < 65525) {
+        type = FS_FAT16;
+    } else {
+        type = FS_FAT32;
+    }
+
+    return type;
+}
+
 /**
  * 从dbr中解析出fat相关配置参数
  * @param dbr 读取的设备dbr
@@ -947,28 +966,46 @@ xfat_err_t xfat_init(void) {
  */
 static xfat_err_t parse_fat_header(xfat_t* xfat, dbr_t* dbr) {
 	xdisk_part_t* xdisk_part = xfat->disk_part;
+    xfs_type_t type = FS_UNKNOWN;
 
-	// 解析DBR参数，解析出有用的参数
-	xfat->root_cluster = dbr->fat32.BPB_RootClus;
-	xfat->fat_tbl_sectors = dbr->fat32.BPB_FATSz32;
+    type = detect_fstype_by_dbr(dbr);
+    if ((xdisk_part->type != FS_UNKNOWN) && (xdisk_part->type != type)) {
+        return FS_ERR_INVALID_FS;
+    }
 
-	// 如果禁止FAT镜像，只刷新一个FAT表
-	// disk_part->start_block为该分区的绝对物理扇区号，所以不需要再加上Hidden_sector
-	if (dbr->fat32.BPB_ExtFlags & (1 << 7)) {
-		u32_t table = dbr->fat32.BPB_ExtFlags & 0xF;
-		xfat->fat_start_sector = dbr->bpb.BPB_RsvdSecCnt + xdisk_part->start_sector + table * xfat->fat_tbl_sectors;
-		xfat->fat_tbl_nr = 1;
-	}
-	else {
-		xfat->fat_start_sector = dbr->bpb.BPB_RsvdSecCnt + xdisk_part->start_sector;
-		xfat->fat_tbl_nr = dbr->bpb.BPB_NumFATs;
-	}
+    xfat->fat_tbl_sectors = dbr->bpb.BPB_FATSz16 ? dbr->bpb.BPB_FATSz16 : dbr->fat32.BPB_FATSz32;
+    xfat->total_sectors = dbr->bpb.BPB_TotSec16 ? dbr->bpb.BPB_TotSec16 : bpb->BPB_TotSec32;
+    xfat->sec_per_cluster = dbr->bpb.BPB_SecPerClus;
+    xfat->cluster_byte_size = xfat->sec_per_cluster * dbr->bpb.BPB_BytsPerSec;
 
-	xfat->sec_per_cluster = dbr->bpb.BPB_SecPerClus;
-	xfat->total_sectors = dbr->bpb.BPB_TotSec32;
-	xfat->cluster_byte_size = xfat->sec_per_cluster * dbr->bpb.BPB_BytsPerSec;
-	xfat->fsi_sector = dbr->fat32.BPB_FsInfo;
-	xfat->backup_sector = dbr->fat32.BPB_BkBootSec;
+    xfat->fat_start_sector = dbr->bpb.BPB_RsvdSecCnt + xdisk_part->start_sector;
+    xfat->fat_tbl_nr = dbr->bpb.BPB_NumFATs;
+
+    switch (type) {
+        case FS_FAT32:
+        case FS_WIN95_FAT32_0:
+        case FS_WIN95_FAT32_1:
+            xfat->root_cluster = dbr->fat32.BPB_RootClus;
+            xfat->fsi_sector = dbr->fat32.BPB_FsInfo;
+            xfat->backup_sector = dbr->fat32.BPB_BkBootSec;
+
+            // 如果禁止FAT镜像，只刷新一个FAT表
+            // disk_part->start_block为该分区的绝对物理扇区号，所以不需要再加上Hidden_sector
+            if (dbr->fat32.BPB_ExtFlags & (1 << 7)) {
+                u32_t table = dbr->fat32.BPB_ExtFlags & 0xF;
+                xfat->fat_start_sector = dbr->bpb.BPB_RsvdSecCnt + xdisk_part->start_sector + table * xfat->fat_tbl_sectors;
+                xfat->fat_tbl_nr = 1;
+            }
+
+            xfat->feature = XFAT_FEATURE_FSINFO | XFAT_FEATURE_BACKUP;
+            break;
+        case FS_FAT12:
+        case FS_FAT16:
+            xfat->root_cluster = 0;
+            xfat->fsi_sector = 0;
+            xfat->backup_sector = 0;
+            break;
+    }
 
 	return FS_ERR_OK;
 }
@@ -1087,7 +1124,6 @@ static xfat_err_t save_cluster_free_info(xdisk_t* disk, u32_t total_free, u32_t 
  * @return
  */
 xfat_err_t xfat_mount(xfat_t* xfat, xdisk_part_t* xdisk_part, const char* mount_name) {
-	dbr_t* dbr;
 	xdisk_t* xdisk = xdisk_part->disk;
 	xfat_err_t err;
 	xfat_buf_t* buf;
@@ -1100,25 +1136,25 @@ xfat_err_t xfat_mount(xfat_t* xfat, xdisk_part_t* xdisk_part, const char* mount_
 	}
 
 	xfat->disk_part = xdisk_part;
+	xfat->feature = 0;
 
 	err = xfat_bpool_read_sector(to_obj(xfat), &buf, xdisk_part->start_sector);
 	if (err < 0) {
 		return err;
 	}
-	dbr = (dbr_t*)buf->buf;
 
-	// 解析dbr参数中的fat相关信息
-	err = parse_fat_header(xfat, dbr);
+	err = parse_fat_header(xfat, (dbr_t*)buf->buf);
 	if (err < 0) {
 		return err;
 	}
 
-	err = load_cluster_free_info(xfat);
-	if (err < 0) {
-		return err;
-	}
+	if (is_xfat_feature_on(xfat, XFAT_FEATURE_FSINFO)) {
+        err = load_cluster_free_info(xfat);
+        if (err < 0) {
+            return err;
+        }
+    }
 
-	// 添加至挂载点
 	err = add_to_mount(xfat, mount_name);
 	return err;
 }
@@ -1128,8 +1164,11 @@ xfat_err_t xfat_mount(xfat_t* xfat, xdisk_part_t* xdisk_part, const char* mount_
  * @param xfat
  */
 void xfat_unmount(xfat_t* xfat) {
-	save_cluster_free_info(xfat_get_disk(xfat), xfat->cluster_total_free,
-		xfat->cluster_next_free, xfat->fsi_sector, xfat->backup_sector);
+    if (is_xfat_feature_on(xfat, XFAT_FEATURE_FSINFO)) {
+        save_cluster_free_info(xfat_get_disk(xfat), xfat->cluster_total_free,
+                               xfat->cluster_next_free, xfat->fsi_sector, xfat->backup_sector);
+    }
+    
 	xfat_bpool_flush(to_obj(xfat));
 	xfat_list_remove(xfat);
 }

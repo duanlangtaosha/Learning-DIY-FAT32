@@ -20,6 +20,7 @@ typedef enum {
     FS_EXTEND = 0x05,               // 扩展分区
     FS_WIN95_FAT32_0 = 0xB,         // FAT32
     FS_WIN95_FAT32_1 = 0xC,         // FAT32
+    FS_UNKNOWN,
 }xfs_type_t;
 
 #pragma pack(1)
