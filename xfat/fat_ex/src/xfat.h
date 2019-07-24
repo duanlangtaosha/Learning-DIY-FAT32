@@ -67,7 +67,7 @@ typedef struct _fat32_hdr_t {
  */
 typedef struct _dbr_t {
     bpb_t bpb;                          // BPB结构
-    enum {
+    union {
         fat12_16_hdr_t fat12_16;
         fat32_hdr_t  fat32;             // FAT32结构
     };
@@ -137,6 +137,13 @@ typedef struct _diritem_t {
 /**
  * 簇类型
  */
+typedef union _cluster16_t {
+    struct {
+        u16_t next;
+    }s;
+    u16_t v;
+}cluster16_t;
+
 typedef union _cluster32_t {
     struct {
         u32_t next : 28;                // 下一簇
@@ -164,7 +171,8 @@ typedef struct _fsinto_t {
 #define XFAT_FEATURE_FSINFO         (1 << 0)
 #define XFAT_FEATURE_BACKUP         (1 << 1)
 
-#define is_xfat_feature_on(xfat, feature)   ((xfat)->feature) & (feature))
+#define is_xfat_feature_on(xfat, f)     (((xfat)->feature) & (f))
+#define set_xfat_feature_on(xfat, f)    (((xfat)->feature) |= (f))
 
 /**
  * xfat结构
@@ -319,7 +327,7 @@ typedef struct _xfat_fmt_info_t {
 }xfat_fmt_info_t;
 
 u32_t cluster_fist_sector(xfat_t *xfat, u32_t cluster_no);
-xfat_err_t is_cluster_valid(u32_t cluster);
+xfat_err_t is_cluster_valid(xfat_t* xfat, u32_t cluster);
 xfat_err_t get_next_cluster(xfat_t *xfat, u32_t curr_cluster_no, u32_t *next_cluster);
 xfat_err_t read_cluster(xfat_t *xfat, u8_t *buffer, u32_t cluster, u32_t count);
 

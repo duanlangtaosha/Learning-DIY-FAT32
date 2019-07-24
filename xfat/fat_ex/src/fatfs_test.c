@@ -193,7 +193,7 @@ int fat_dir_test(void) {
 
     // 解析根目录所在的簇
     curr_cluster = xfat.root_cluster;
-    while (is_cluster_valid(curr_cluster)) {
+    while (is_cluster_valid(&xfat, curr_cluster)) {
         err = read_cluster(&xfat, culster_buffer, curr_cluster, 1);
 		xlib_abort(err < 0, "read cluster %d failed\n", curr_cluster);
 
@@ -231,7 +231,7 @@ int fat_file_test(void) {
 
     // 从fat_dir_test选择1个文件的cluster起始号，根据测试情况修改
     curr_cluster = 4565;    // 62.txt
-    while (is_cluster_valid(curr_cluster)) {
+    while (is_cluster_valid(&xfat, curr_cluster)) {
         err = read_cluster(&xfat, culster_buffer, curr_cluster, 1);
 		xlib_abort(err < 0, "read cluster %d failed!", curr_cluster);
 

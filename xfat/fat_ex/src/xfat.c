@@ -27,14 +27,19 @@
 #define to_cluster(xfat, pos)		((pos) / (xfat)->cluster_byte_size)
 #define	to_cluseter_count(xfat, size)		(size ? to_cluster(xfat, size) + 1 : 0)
 
+u32_t get_cluster_invalid(xfat_t* xfat) {
+    switch (xfat->disk_part->type) {
+    case FS_FAT12:
+        return 0xFFF;
+    case FS_FAT16:
+        return 0xFFFF;
+    case FS_WIN95_FAT32_0:
+    case FS_WIN95_FAT32_1:
+    default:
+        return 0x0FFFFFFF;
+    }
+}
 
-/**
- * 将簇号和簇偏移转换为扇区号
- * @param xfat
- * @param cluster
- * @param cluster_offset
- * @return
- */
 u32_t to_phy_sector(xfat_t* xfat, u32_t cluster, u32_t cluster_offset) {
     xdisk_t* disk = xfat_get_disk(xfat);
     return cluster_fist_sector((xfat), (cluster)) + to_sector((disk), (cluster_offset));
@@ -42,12 +47,12 @@ u32_t to_phy_sector(xfat_t* xfat, u32_t cluster, u32_t cluster_offset) {
 
 u32_t to_fat_sector(xfat_t* xfat, u32_t cluster) {
     u32_t sector_size = xfat_get_disk(xfat)->sector_size;
-    return cluster * sizeof(cluster32_t) / sector_size + xfat->fat_start_sector;
+    return cluster * get_cluster_width(xfat) / 4 / sector_size + xfat->fat_start_sector;
 }
 
 u32_t to_fat_offset(xfat_t* xfat, u32_t cluster) {
     u32_t sector_size = xfat_get_disk(xfat)->sector_size;
-    return cluster * sizeof(cluster32_t) % sector_size;
+    return cluster * get_cluster_width(xfat) % sector_size;
 }
 
 static xfat_t * xfat_list;          // 已挂载的xfat链表
@@ -166,9 +171,21 @@ u32_t cluster_fist_sector(xfat_t *xfat, u32_t cluster_no) {
  * @param cluster 待检查的簇
  * @return
  */
-int is_cluster_valid(u32_t cluster) {
-    cluster &= 0x0FFFFFFF;
-    return (cluster < 0x0FFFFFF0) && (cluster >= 0x2);     // 值是否正确
+int is_cluster_valid(xfat_t * xfat, u32_t cluster) {
+    u32_t width = get_cluster_width(xfat);
+
+    switch (width) {
+    case FS_FAT12:
+        return 0;
+    case FS_FAT16:
+        return (cluster < 0xFFF0) && (cluster >= 0x2);     // 值是否正确
+    case FS_WIN95_FAT32_0:
+    case FS_WIN95_FAT32_1:
+        cluster &= 0x0FFFFFFF;
+        return (cluster < 0x0FFFFFF0) && (cluster >= 0x2);     // 值是否正确
+    default:
+        return 0;
+    }
 }
 
 /**
@@ -179,18 +196,32 @@ int is_cluster_valid(u32_t cluster) {
  * @return
  */
 xfat_err_t get_next_cluster(xfat_t * xfat, u32_t curr_cluster_no, u32_t * next_cluster) {
-    if (is_cluster_valid(curr_cluster_no)) {
+    if (is_cluster_valid(xfat, curr_cluster_no)) {
         xfat_buf_t* buf;
         xfat_err_t err;
-        cluster32_t* cluster32_buf;
+        u8_t* cluster_ptr;
 
-        err = xfat_bpool_read_sector(to_obj(xfat), &buf, to_fat_sector(xfat, curr_cluster_no));
-        if (err < 0) return err;
-
-        cluster32_buf = (cluster32_t*)(buf->buf + to_fat_offset(xfat, curr_cluster_no));
-        *next_cluster = cluster32_buf->s.next;
+        switch (xfat->disk_part->type) {
+        case FS_FAT12:
+            break;
+        case FS_FAT16:
+            err = xfat_bpool_read_sector(to_obj(xfat), &buf, to_fat_sector(xfat, curr_cluster_no));
+            if (err < 0) return err;
+            cluster_ptr = buf->buf + to_fat_offset(xfat, curr_cluster_no);
+            *next_cluster = ((cluster16_t*)cluster_ptr)->s.next;
+            break;
+        case FS_WIN95_FAT32_0:
+        case FS_WIN95_FAT32_1:
+            err = xfat_bpool_read_sector(to_obj(xfat), &buf, to_fat_sector(xfat, curr_cluster_no));
+            if (err < 0) return err;
+            cluster_ptr = buf->buf + to_fat_offset(xfat, curr_cluster_no);
+            *next_cluster = ((cluster32_t*)cluster_ptr)->s.next;
+            break;
+        default:
+            break;
+        }
     } else {
-        *next_cluster = CLUSTER_INVALID;
+        *next_cluster = get_cluster_invalid(xfat);
     }
 
     return FS_ERR_OK;
@@ -204,17 +235,28 @@ xfat_err_t get_next_cluster(xfat_t * xfat, u32_t curr_cluster_no, u32_t * next_c
  * @return
  */
 xfat_err_t put_next_cluster(xfat_t* xfat, u32_t curr_cluster_no, u32_t next_cluster) {
-    if (is_cluster_valid(curr_cluster_no)) {
+    if (is_cluster_valid(xfat, curr_cluster_no)) {
         xfat_buf_t* buf;
         xfat_err_t err;
         u32_t i;
-        cluster32_t* cluster32_buf;
+        u8_t* cluster_ptr;
 
         err = xfat_bpool_read_sector(to_obj(xfat), &buf, to_fat_sector(xfat, curr_cluster_no));
         if (err < 0) return err;
 
-        cluster32_buf = (cluster32_t*)(buf->buf + to_fat_offset(xfat, curr_cluster_no));
-        cluster32_buf->s.next = next_cluster;
+        switch (xfat->disk_part->type) {
+        case FS_FAT12:
+            break;
+        case FS_FAT16:
+            cluster_ptr = buf->buf + to_fat_offset(xfat, curr_cluster_no);
+            ((cluster16_t *)cluster_ptr)->s.next = next_cluster;
+            break;
+        case FS_WIN95_FAT32_0:
+        case FS_WIN95_FAT32_1:
+            cluster_ptr = buf->buf + to_fat_offset(xfat, curr_cluster_no);
+            ((cluster32_t*)cluster_ptr)->s.next = next_cluster;
+            break;
+        }
 
         err = xfat_bpool_write_sector(to_obj(xfat), buf, 1);
         if (err < 0) return err;
@@ -271,19 +313,28 @@ static xfat_err_t destroy_cluster_chain(xfat_t* xfat, u32_t cluster) {
 	xdisk_t* disk = xfat_get_disk(xfat);
 	u32_t curr_cluster = cluster;
 
-	while (is_cluster_valid(curr_cluster)) {
+	while (is_cluster_valid(xfat, curr_cluster)) {
 		u32_t next_cluster;
 		xfat_buf_t* buf;
 		xfat_err_t err;
-		cluster32_t* cluster32_buf;
+		u8_t* cluster_ptr;
 
 		err = xfat_bpool_read_sector(to_obj(xfat), &buf, to_fat_sector(xfat, curr_cluster));
 		if (err < 0) return err;
 
-		cluster32_buf = (cluster32_t*)(buf->buf + to_fat_offset(xfat, curr_cluster));
-		next_cluster = cluster32_buf->s.next;
-		cluster32_buf->s.next = CLUSTER_FREE;
-
+        switch (xfat->disk_part->type) {
+        case FS_FAT12:
+            break;
+        case FS_FAT16:
+            cluster_ptr = buf->buf + to_fat_offset(xfat, curr_cluster);
+            ((cluster16_t*)cluster_ptr)->s.next = next_cluster;
+            break;
+        case FS_WIN95_FAT32_0:
+        case FS_WIN95_FAT32_1:
+            cluster_ptr = buf->buf + to_fat_offset(xfat, curr_cluster);
+            ((cluster32_t*)cluster_ptr)->s.next = next_cluster;
+            break;
+        }
 		err = xfat_bpool_write_sector(to_obj(xfat), buf, 1);
 		if (err < 0) return err;
 
@@ -297,7 +348,7 @@ static xfat_err_t destroy_cluster_chain(xfat_t* xfat, u32_t cluster) {
 		xfat->cluster_total_free++;
 	}
 
-	if (!is_cluster_valid(xfat->cluster_next_free)) {
+	if (!is_cluster_valid(xfat, xfat->cluster_next_free)) {
 		xfat->cluster_next_free = cluster;
 	}
 
@@ -323,7 +374,7 @@ static xfat_err_t allocate_free_cluster(xfat_t * xfat, u32_t curr_cluster, u32_t
     u32_t searched_count = 0;
     u32_t total_clusters;
     
-    total_clusters  = (u64_t)xfat->fat_tbl_sectors * xfat_get_disk(xfat)->sector_size / sizeof(cluster32_t);
+    total_clusters  = (u64_t)xfat->fat_tbl_sectors * xfat_get_disk(xfat)->sector_size / get_cluster_width(xfat) / 4;
 
     while (xfat->cluster_total_free && (allocated_count < count) && (searched_count < total_clusters)) {
         u32_t next_cluster;
@@ -759,7 +810,7 @@ xfat_err_t get_next_diritem(xfat_t* xfat, u8_t type, u32_t start_cluster, u32_t 
     xfat_err_t err;
     diritem_t* r_diritem;
 
-    while (is_cluster_valid(start_cluster)) {
+    while (is_cluster_valid(xfat, start_cluster)) {
         u32_t sector_offset;
 		u32_t curr_sector;
 
@@ -926,7 +977,7 @@ static xfat_err_t locate_file_dir_item(xfat_t *xfat, u8_t locate_type, u32_t *di
 
         initial_sector = 0;
         initial_offset = 0;
-    }while (is_cluster_valid(curr_cluster));
+    }while (is_cluster_valid(xfat, curr_cluster));
 
     return FS_ERR_EOF;
 }
@@ -941,19 +992,20 @@ xfat_err_t xfat_init(void) {
 }
 
 static xfs_type_t detect_fstype_by_dbr(dbr_t * dbr) {
-    bpb_t * bpb = dbr->bpb;
+    xfs_type_t type;
+    bpb_t * bpb = &dbr->bpb;
 
     u32_t root_dir_sectors = (bpb->BPB_RootEntCnt * sizeof(diritem_t) + bpb->BPB_BytsPerSec - 1) / bpb->BPB_BytsPerSec;
     u32_t fat_sectors = bpb->BPB_FATSz16 ? bpb->BPB_FATSz16 : dbr->fat32.BPB_FATSz32;
     u32_t total_sectors = bpb->BPB_TotSec16 ? bpb->BPB_TotSec16 : bpb->BPB_TotSec32;
-    u32_t data_sectors = total_sectors - (bpb->BPB_RsvdSecCnt + bpb->BPB_NumFATs * fat_sectors) + root_dir_sectors);
+    u32_t data_sectors = total_sectors - ((bpb->BPB_RsvdSecCnt + bpb->BPB_NumFATs * fat_sectors) + root_dir_sectors);
     u32_t cluster_count = data_sectors / bpb->BPB_SecPerClus;
     if (cluster_count < 4085) {
         type = FS_FAT12;
     } else if (cluster_count < 65525) {
         type = FS_FAT16;
     } else {
-        type = FS_FAT32;
+        type = FS_WIN95_FAT32_0;
     }
 
     return type;
@@ -972,9 +1024,10 @@ static xfat_err_t parse_fat_header(xfat_t* xfat, dbr_t* dbr) {
     if ((xdisk_part->type != FS_UNKNOWN) && (xdisk_part->type != type)) {
         return FS_ERR_INVALID_FS;
     }
+    xdisk_part->type = type;
 
     xfat->fat_tbl_sectors = dbr->bpb.BPB_FATSz16 ? dbr->bpb.BPB_FATSz16 : dbr->fat32.BPB_FATSz32;
-    xfat->total_sectors = dbr->bpb.BPB_TotSec16 ? dbr->bpb.BPB_TotSec16 : bpb->BPB_TotSec32;
+    xfat->total_sectors = dbr->bpb.BPB_TotSec16 ? dbr->bpb.BPB_TotSec16 : dbr->bpb.BPB_TotSec32;
     xfat->sec_per_cluster = dbr->bpb.BPB_SecPerClus;
     xfat->cluster_byte_size = xfat->sec_per_cluster * dbr->bpb.BPB_BytsPerSec;
 
@@ -982,7 +1035,6 @@ static xfat_err_t parse_fat_header(xfat_t* xfat, dbr_t* dbr) {
     xfat->fat_tbl_nr = dbr->bpb.BPB_NumFATs;
 
     switch (type) {
-        case FS_FAT32:
         case FS_WIN95_FAT32_0:
         case FS_WIN95_FAT32_1:
             xfat->root_cluster = dbr->fat32.BPB_RootClus;
@@ -997,7 +1049,7 @@ static xfat_err_t parse_fat_header(xfat_t* xfat, dbr_t* dbr) {
                 xfat->fat_tbl_nr = 1;
             }
 
-            xfat->feature = XFAT_FEATURE_FSINFO | XFAT_FEATURE_BACKUP;
+            set_xfat_feature_on(xfat, XFAT_FEATURE_FSINFO | XFAT_FEATURE_BACKUP);
             break;
         case FS_FAT12:
         case FS_FAT16:
@@ -1371,7 +1423,6 @@ static xfat_err_t create_dbr(xdisk_part_t* xdisk_part, xfat_fmt_ctrl_t* ctrl, xf
  */
 int xfat_is_fs_supported(xfs_type_t type) {
 	switch (type) {
-	case FS_FAT32:
 	case FS_WIN95_FAT32_0:
 	case FS_WIN95_FAT32_1:
 		return 1;
@@ -1825,7 +1876,7 @@ static xfat_err_t create_sub_file (xfat_t * xfat, u8_t is_dir, u32_t parent_clus
         } else if (diritem->DIR_Name[0] == DIRITEM_NAME_FREE) {
             // 空闲项, 还要继续检查，看是否有同名项
             // 记录空闲项的位置
-            if (!is_cluster_valid(free_item_cluster)) {
+            if (!is_cluster_valid(xfat, free_item_cluster)) {
                 free_item_cluster = curr_cluster;
                 free_item_offset = curr_offset;
             }
@@ -1859,7 +1910,7 @@ static xfat_err_t create_sub_file (xfat_t * xfat, u8_t is_dir, u32_t parent_clus
 	}
 
     // 未找到空闲的项，需要为父目录申请新簇，以放置新文件/目录
-    if ((target_item == (diritem_t *)0) && !is_cluster_valid(free_item_cluster)) {
+    if ((target_item == (diritem_t *)0) && !is_cluster_valid(xfat, free_item_cluster)) {
         u32_t parent_diritem_cluster;
         u32_t cluster_count;
 
@@ -1879,7 +1930,7 @@ static xfat_err_t create_sub_file (xfat_t * xfat, u8_t is_dir, u32_t parent_clus
         target_item = (diritem_t *)buf->buf;     // 获取新簇项
     } else {    // 找到空闲或末尾
         u32_t diritem_offset;
-        if (is_cluster_valid(free_item_cluster)) {
+        if (is_cluster_valid(xfat, free_item_cluster)) {
             file_diritem_sector = cluster_fist_sector(xfat, free_item_cluster) + to_sector(disk, free_item_offset);
             diritem_offset = free_item_offset;
         } else {
@@ -2051,7 +2102,7 @@ static xfat_err_t move_file_pos(xfile_t* file, u32_t move_bytes) {
 			return err;
 		}
 
-		if (is_cluster_valid(curr_cluster)) {
+		if (is_cluster_valid(file->xfat, curr_cluster)) {
 			file->curr_cluster = curr_cluster;
 		}
 	}
@@ -2092,7 +2143,7 @@ xfile_size_t xfile_read(void * buffer, xfile_size_t elem_size, xfile_size_t coun
     }
 
 
-    while ((bytes_to_read > 0) && is_cluster_valid(file->curr_cluster)) {
+    while ((bytes_to_read > 0) && is_cluster_valid(file->xfat, file->curr_cluster)) {
         xfat_err_t err;
         xfile_size_t curr_read_bytes = 0;
         u32_t sector_count = 0;
@@ -2241,7 +2292,7 @@ static xfat_err_t expand_file(xfile_t * file, xfile_size_t size) {
 					file->err = err;
 					return err;
 				}
-			} while (is_cluster_valid(next_cluster));
+			} while (is_cluster_valid(xfat, next_cluster));
         }
 
         // 然后再从最后一簇分配空间
@@ -2251,10 +2302,10 @@ static xfat_err_t expand_file(xfile_t * file, xfile_size_t size) {
             return err;
         }
 
-		if (!is_cluster_valid(file->start_cluster)) {
+		if (!is_cluster_valid(xfat, file->start_cluster)) {
 			file->start_cluster = start_free_cluster;
 			file->curr_cluster = start_free_cluster;
-		} else if (!is_cluster_valid(file->curr_cluster) || is_fpos_cluster_end(file)) {
+		} else if (!is_cluster_valid(xfat, file->curr_cluster) || is_fpos_cluster_end(file)) {
 			file->curr_cluster = start_free_cluster;
 		}
     }
@@ -2307,7 +2358,7 @@ xfile_size_t xfile_write(void * buffer, xfile_size_t elem_size, xfile_size_t cou
         }
     }
 
-	while ((bytes_to_write > 0) && is_cluster_valid(file->curr_cluster)) {
+	while ((bytes_to_write > 0) && is_cluster_valid(file->xfat, file->curr_cluster)) {
 		u32_t curr_write_bytes = 0;
         u32_t sector_count = 0;
 

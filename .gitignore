@@ -58,3 +58,4 @@ Debug/
 *.cproject
 .vs
 .idea/
+disk_test.img
