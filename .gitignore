@@ -58,3 +58,4 @@ Debug/
 *.cproject
 .vs
 .idea/
+*.img
