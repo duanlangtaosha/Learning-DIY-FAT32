@@ -296,18 +296,28 @@ xfat_err_t xfat_bpool_alloc(xfat_obj_t* obj, xfat_buf_t** buf, u32_t sector_no) 
  * @param sector_no
  * @return
  */
-xfat_err_t xfat_bpool_write_sector(xfat_obj_t* obj, xfat_buf_t* buf, u8_t is_through) {
+xfat_err_t xfat_bpool_write_sector(xfat_obj_t* obj, xfat_buf_t* buf) {
     xfat_err_t err = FS_ERR_OK;
 
-    if (is_through) {
+    xfat_buf_set_state(buf, XFAT_BUF_STATE_DIRTY);
+    return err;
+}
+
+/**
+ * 重新设置缓冲块的扇区号，但不读取物理扇区
+ */
+xfat_err_t xfat_bpool_set_sector(xfat_obj_t* obj, xfat_buf_t * buf, u32_t sector) {
+    xfat_err_t err = FS_ERR_OK;
+
+    if (buf->sector_no != sector) {
         err = xdisk_write_sector(get_obj_disk(obj), buf->buf, buf->sector_no, 1);
         if (err < 0) {
             return err;
         }
-        xfat_buf_set_state(buf, XFAT_BUF_STATE_CLEAN);
-    } else {
-        xfat_buf_set_state(buf, XFAT_BUF_STATE_DIRTY);
+
+        buf->sector_no = sector;
     }
+
     return err;
 }
 

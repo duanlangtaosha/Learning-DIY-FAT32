@@ -45,7 +45,8 @@ typedef struct _xfat_bpool_t {
 
 xfat_err_t xfat_bpool_init(xfat_obj_t* obj, u32_t sector_size, u8_t * buffer, u32_t buf_size);
 xfat_err_t xfat_bpool_read_sector(xfat_obj_t* obj, xfat_buf_t** buf, u32_t sector_no);
-xfat_err_t xfat_bpool_write_sector(xfat_obj_t* obj, xfat_buf_t* buf, u8_t is_through);
+xfat_err_t xfat_bpool_write_sector(xfat_obj_t* obj, xfat_buf_t* buf);
+xfat_err_t xfat_bpool_set_sector(xfat_obj_t* obj, xfat_buf_t * buf, u32_t sector);
 xfat_err_t xfat_bpool_alloc(xfat_obj_t* obj, xfat_buf_t** buf, u32_t sector_no);
 xfat_err_t xfat_bpool_flush(xfat_obj_t* obj);
 xfat_err_t xfat_bpool_flush_sectors(xfat_obj_t* obj, u32_t start_sector, u32_t count);

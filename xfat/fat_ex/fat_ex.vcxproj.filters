@@ -27,9 +27,6 @@
     <ClInclude Include="src\xfat_obj.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="src\xlib.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\driver.c">
@@ -48,9 +45,6 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="src\xfat_obj.c">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="src\xlib.c">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

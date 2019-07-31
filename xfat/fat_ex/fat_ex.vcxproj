@@ -160,7 +160,6 @@
     <ClInclude Include="src\xdisk.h" />
     <ClInclude Include="src\xfat.h" />
     <ClInclude Include="src\xfat_buf.h" />
-    <ClInclude Include="src\xlib.h" />
     <ClInclude Include="src\xfat_obj.h" />
   </ItemGroup>
   <ItemGroup>
@@ -168,7 +167,6 @@
     <ClCompile Include="src\fatfs_test.c" />
     <ClCompile Include="src\xdisk.c" />
     <ClCompile Include="src\xfat.c" />
-    <ClCompile Include="src\xlib.c" />
     <ClCompile Include="src\xfat_buf.c" />
     <ClCompile Include="src\xfat_obj.c" />
   </ItemGroup>

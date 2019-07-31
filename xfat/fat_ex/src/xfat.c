@@ -4,6 +4,9 @@
  * 课程网址：http://01ketang.cc
  * 版权声明：本源码非开源，二次开发，或其它商用前请联系作者。
  */
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
 #include "xfat.h"
 #include "xdisk.h"
 
@@ -27,28 +30,7 @@
 #define to_cluster(xfat, pos)		((pos) / (xfat)->cluster_byte_size)
 #define	to_cluseter_count(xfat, size)		(size ? to_cluster(xfat, size) + 1 : 0)
 
-
-/**
- * 将簇号和簇偏移转换为扇区号
- * @param xfat
- * @param cluster
- * @param cluster_offset
- * @return
- */
-u32_t to_phy_sector(xfat_t* xfat, u32_t cluster, u32_t cluster_offset) {
-    xdisk_t* disk = xfat_get_disk(xfat);
-    return cluster_fist_sector((xfat), (cluster)) + to_sector((disk), (cluster_offset));
-}
-
-u32_t to_fat_sector(xfat_t* xfat, u32_t cluster) {
-    u32_t sector_size = xfat_get_disk(xfat)->sector_size;
-    return cluster * sizeof(cluster32_t) / sector_size + xfat->fat_start_sector;
-}
-
-u32_t to_fat_offset(xfat_t* xfat, u32_t cluster) {
-    u32_t sector_size = xfat_get_disk(xfat)->sector_size;
-    return cluster * sizeof(cluster32_t) % sector_size;
-}
+#define is_part_fat32(part) ((part)->type == FS_WIN95_FAT32_0 || (part)->type == FS_WIN95_FAT32_1)
 
 static xfat_t * xfat_list;          // 已挂载的xfat链表
 
@@ -79,10 +61,6 @@ void xfat_list_add (xfat_t * xfat) {
 void xfat_list_remove (xfat_t * xfat) {
     xfat_t * pre = (xfat_t *)0;
     xfat_t * curr = xfat_list;
-
-	if (xfat == (xfat_t*)0) {
-		return;
-	}
 
     // 遍历找到设备结点
     while ((curr != xfat) && (curr != (xfat_t *)0)) {
@@ -151,14 +129,81 @@ static xfat_t * xfat_find_by_name (const char * name) {
 }
 
 /**
+ * 初始化xfat文件系统
+ * @return
+ */
+xfat_err_t xfat_init(void) {
+    xfat_list_init();
+    return FS_ERR_OK;
+}
+
+static int xfs_cluster_bit_width(xfs_type_t type) {
+    switch (type) {
+    case FS_FAT12:
+        return 12;
+    case FS_FAT16:
+        return 16;    
+    case FS_WIN95_FAT32_0:
+    case FS_WIN95_FAT32_1:
+        return 32;
+    default:
+        return 0;
+    }
+}
+
+#define xfat_cluster_bit_width(xfat)    (xfs_cluster_bit_width((xfat)->disk_part->type))
+
+static u32_t get_cluster_value(xfat_t * xfat, u8_t * cluster_ptr) {
+    u8_t bit_width = xfat_cluster_bit_width(xfat);
+
+    switch (bit_width) {
+    case 12: return (*(u8_t *)cluster_ptr);      // todo:
+    case 16: return ((cluster16_t *)cluster_ptr)->s.next;
+    case 32: return ((cluster32_t *)cluster_ptr)->s.next;
+    default: return CLUSTER_INVALID;
+    }
+}
+
+static void set_cluster_value(xfat_t * xfat, u8_t * cluster_ptr, u32_t v) {
+    u8_t bit_width = xfat_cluster_bit_width(xfat);
+
+    switch (bit_width) {
+    case 12: (*(u8_t *)cluster_ptr) = (u8_t)v;
+    case 16: ((cluster16_t *)cluster_ptr)->s.next = (u16_t)v;
+    case 32: ((cluster32_t *)cluster_ptr)->s.next = (u32_t)v;
+    default: break;
+    }
+}
+
+static u32_t xfat_total_clusters (xfat_t * xfat) {
+    u32_t bytes = xfat->fat_tbl_sectors * xfat_get_disk(xfat)->sector_size;
+    return bytes * 8 / xfat_cluster_bit_width(xfat);
+}
+
+/**
  * 获取指定簇号的第一个扇区编号
  * @param xfat xfat结构
  * @param cluster_no  簇号
  * @return 扇区号
  */
-u32_t cluster_fist_sector(xfat_t *xfat, u32_t cluster_no) {
+static u32_t cluster_fist_sector(xfat_t *xfat, u32_t cluster_no) {
     u32_t data_start_sector = xfat->fat_start_sector + xfat->fat_tbl_sectors * xfat->fat_tbl_nr;
     return data_start_sector + (cluster_no - 2) * xfat->sec_per_cluster;    // 前两个簇号保留
+}
+
+static u32_t to_phy_sector(xfat_t* xfat, u32_t cluster, u32_t cluster_offset) {
+    xdisk_t* disk = xfat_get_disk(xfat);
+    return cluster_fist_sector((xfat), (cluster)) + to_sector((disk), (cluster_offset));
+}
+
+static u32_t to_fat_sector(xfat_t* xfat, u32_t cluster) {
+    u32_t sector_size = xfat_get_disk(xfat)->sector_size;
+    return cluster * xfat_cluster_byte_width(xfat) / sector_size + xfat->fat_start_sector;
+}
+
+static u32_t to_fat_offset(xfat_t* xfat, u32_t cluster) {
+    u32_t sector_size = xfat_get_disk(xfat)->sector_size;
+    return cluster * xfat_cluster_byte_width(xfat) % sector_size;
 }
 
 /**
@@ -182,13 +227,13 @@ xfat_err_t get_next_cluster(xfat_t * xfat, u32_t curr_cluster_no, u32_t * next_c
     if (is_cluster_valid(curr_cluster_no)) {
         xfat_buf_t* buf;
         xfat_err_t err;
-        cluster32_t* cluster32_buf;
+        u8_t * cluster_ptr;
 
         err = xfat_bpool_read_sector(to_obj(xfat), &buf, to_fat_sector(xfat, curr_cluster_no));
         if (err < 0) return err;
 
-        cluster32_buf = (cluster32_t*)(buf->buf + to_fat_offset(xfat, curr_cluster_no));
-        *next_cluster = cluster32_buf->s.next;
+        cluster_ptr = buf->buf + to_fat_offset(xfat, curr_cluster_no);
+        *next_cluster = get_cluster_value(xfat, cluster_ptr);
     } else {
         *next_cluster = CLUSTER_INVALID;
     }
@@ -208,20 +253,22 @@ xfat_err_t put_next_cluster(xfat_t* xfat, u32_t curr_cluster_no, u32_t next_clus
         xfat_buf_t* buf;
         xfat_err_t err;
         u32_t i;
-        cluster32_t* cluster32_buf;
+        u8_t * cluster_ptr;
 
         err = xfat_bpool_read_sector(to_obj(xfat), &buf, to_fat_sector(xfat, curr_cluster_no));
         if (err < 0) return err;
 
-        cluster32_buf = (cluster32_t*)(buf->buf + to_fat_offset(xfat, curr_cluster_no));
-        cluster32_buf->s.next = next_cluster;
+        cluster_ptr = buf->buf + to_fat_offset(xfat, curr_cluster_no);
+        set_cluster_value(xfat, cluster_ptr, next_cluster);
 
-        err = xfat_bpool_write_sector(to_obj(xfat), buf, 1);
+        err = xfat_bpool_write_sector(to_obj(xfat), buf);
         if (err < 0) return err;
 
         for (i = 1; i < xfat->fat_tbl_nr; i++) {
-            buf->sector_no += xfat->fat_tbl_sectors;
-            err = xfat_bpool_write_sector(to_obj(xfat), buf, 1);
+            err = xfat_bpool_set_sector(to_obj(xfat), buf, buf->sector_no + xfat->fat_tbl_sectors);
+            if (err < 0) return err;
+
+            err = xfat_bpool_write_sector(to_obj(xfat), buf);
             if (err < 0) return err;
         }
     }
@@ -249,59 +296,23 @@ static xfat_err_t erase_cluster(xfat_t * xfat, u32_t cluster, u8_t erase_state) 
     }
 
     // todo: 优化，一次可否擦除多个扇区
-    xlib_memset(buf->buf, erase_state, xdisk->sector_size);
-    for (i = 0; i < xfat->sec_per_cluster; i++, buf->sector_no++) {
-        xfat_err_t err = xfat_bpool_write_sector(to_obj(xfat), buf, 1);
+    memset(buf->buf, erase_state, xdisk->sector_size);
+
+    xfat_err_t err = xfat_bpool_write_sector(to_obj(xfat), buf);
+    if (err < 0) {
+        return err;
+    }
+
+    for (i = 1; i < xfat->sec_per_cluster; i++) {
+        err = xfat_bpool_set_sector(to_obj(xfat), buf, buf->sector_no + 1);
+        if (err < 0) return err;
+
+        xfat_err_t err = xfat_bpool_write_sector(to_obj(xfat), buf);
         if (err < 0) {
             return err;
         }
     }
     return FS_ERR_OK;
-}
-
-/**
- * 解除簇的链接关系
- * @param xfat xfat结构
- * @param cluster 将该簇之后的所有链接依次解除, 并将该簇之后标记为解囊
- * @return
- */
-static xfat_err_t destroy_cluster_chain(xfat_t* xfat, u32_t cluster) {
-	xfat_err_t err = FS_ERR_OK;
-	u32_t i;
-	xdisk_t* disk = xfat_get_disk(xfat);
-	u32_t curr_cluster = cluster;
-
-	while (is_cluster_valid(curr_cluster)) {
-		u32_t next_cluster;
-		xfat_buf_t* buf;
-		xfat_err_t err;
-		cluster32_t* cluster32_buf;
-
-		err = xfat_bpool_read_sector(to_obj(xfat), &buf, to_fat_sector(xfat, curr_cluster));
-		if (err < 0) return err;
-
-		cluster32_buf = (cluster32_t*)(buf->buf + to_fat_offset(xfat, curr_cluster));
-		next_cluster = cluster32_buf->s.next;
-		cluster32_buf->s.next = CLUSTER_FREE;
-
-		err = xfat_bpool_write_sector(to_obj(xfat), buf, 1);
-		if (err < 0) return err;
-
-		for (i = 1; i < xfat->fat_tbl_nr; i++) {
-			buf->sector_no += xfat->fat_tbl_sectors;
-			err = xfat_bpool_write_sector(to_obj(xfat), buf, 1);
-			if (err < 0) return err;
-		}
-
-		curr_cluster = next_cluster;
-		xfat->cluster_total_free++;
-	}
-
-	if (!is_cluster_valid(xfat->cluster_next_free)) {
-		xfat->cluster_next_free = cluster;
-	}
-
-	return err;
 }
 
 /**
@@ -323,8 +334,7 @@ static xfat_err_t allocate_free_cluster(xfat_t * xfat, u32_t curr_cluster, u32_t
     u32_t searched_count = 0;
     u32_t total_clusters;
     
-    total_clusters  = (u64_t)xfat->fat_tbl_sectors * xfat_get_disk(xfat)->sector_size / sizeof(cluster32_t);
-
+    total_clusters = xfat_total_clusters(xfat);
     while (xfat->cluster_total_free && (allocated_count < count) && (searched_count < total_clusters)) {
         u32_t next_cluster;
 
@@ -414,6 +424,712 @@ xfat_err_t read_cluster(xfat_t *xfat, u8_t *buffer, u32_t cluster, u32_t count) 
 }
 
 /**
+ * 解除簇的链接关系
+ * @param xfat xfat结构
+ * @param cluster 将该簇之后的所有链接依次解除, 并将该簇之后标记为解囊
+ * @return
+ */
+static xfat_err_t destroy_cluster_chain(xfat_t* xfat, u32_t cluster) {
+    xfat_err_t err = FS_ERR_OK;
+    u32_t i;
+    xdisk_t* disk = xfat_get_disk(xfat);
+    u32_t curr_cluster = cluster;
+
+    while (is_cluster_valid(curr_cluster)) {
+        u32_t next_cluster;
+        xfat_buf_t* buf;
+        xfat_err_t err;
+        u8_t* cluster_ptr;
+
+        err = xfat_bpool_read_sector(to_obj(xfat), &buf, to_fat_sector(xfat, curr_cluster));
+        if (err < 0) return err;
+
+        cluster_ptr = buf->buf + to_fat_offset(xfat, curr_cluster);
+        next_cluster = get_cluster_value(xfat, cluster_ptr);
+        set_cluster_value(xfat, cluster_ptr, CLUSTER_FREE);
+
+        err = xfat_bpool_write_sector(to_obj(xfat), buf);
+        if (err < 0) return err;
+
+        for (i = 1; i < xfat->fat_tbl_nr; i++) {
+            err = xfat_bpool_set_sector(to_obj(xfat), buf, buf->sector_no + xfat->fat_tbl_sectors);
+            if (err < 0) return err;
+
+            err = xfat_bpool_write_sector(to_obj(xfat), buf);
+            if (err < 0) return err;
+        }
+
+        curr_cluster = next_cluster;
+        xfat->cluster_total_free++;
+    }
+
+    if (!is_cluster_valid(xfat->cluster_next_free)) {
+        xfat->cluster_next_free = cluster;
+    }
+
+    return err;
+}
+
+/**
+ * 从dbr中解析出fat相关配置参数
+ * @param dbr 读取的设备dbr
+ * @return
+ */
+static xfat_err_t parse_fat_header (xfat_t * xfat, dbr_t * dbr) {
+    xdisk_part_t * xdisk_part = xfat->disk_part;
+
+    // 解析DBR参数，解析出有用的参数
+    xfat->fat_tbl_sectors = dbr->bpb.BPB_FATSz16 ? dbr->bpb.BPB_FATSz16: dbr->fat.fat32.BPB_FATSz32;
+    xfat->fat_start_sector = dbr->bpb.BPB_RsvdSecCnt + xdisk_part->start_sector;
+    xfat->fat_tbl_nr = dbr->bpb.BPB_NumFATs;
+
+    if (is_part_fat32(xfat->disk_part)) {
+        xfat->root_cluster = dbr->fat.fat32.BPB_RootClus;
+        xfat->fsi_sector = dbr->fat.fat32.BPB_FsInfo;
+        xfat->backup_sector = dbr->fat.fat32.BPB_BkBootSec;
+
+        // 如果禁止FAT镜像，只刷新一个FAT表
+        // disk_part->start_block为该分区的绝对物理扇区号，所以不需要再加上Hidden_sector
+        if (dbr->fat.fat32.BPB_ExtFlags & (1 << 7)) {
+            u32_t table = dbr->fat.fat32.BPB_ExtFlags & 0xF;
+            xfat->fat_start_sector = dbr->bpb.BPB_RsvdSecCnt + xdisk_part->start_sector + table * xfat->fat_tbl_sectors;
+            xfat->fat_tbl_nr = 1;
+        } 
+    } else {
+        xfat->root_cluster = 0;
+        xfat->fsi_sector = 0;
+        xfat->backup_sector = 0;
+    }
+
+    xfat->sec_per_cluster = dbr->bpb.BPB_SecPerClus;
+    xfat->total_sectors = dbr->bpb.BPB_TotSec16 ? dbr->bpb.BPB_TotSec16 : dbr->bpb.BPB_TotSec32;
+    xfat->cluster_byte_size = xfat->sec_per_cluster * dbr->bpb.BPB_BytsPerSec;
+
+    return FS_ERR_OK;
+}
+
+/**
+ * 将xfat添加至指定的挂载点
+ * @param xfat xfat结构
+ * @param mount_name 挂载点名称
+ * @return
+ */
+xfat_err_t add_to_mount(xfat_t * xfat, const char * mount_name) {
+    memset(xfat->name, 0, XFAT_NAME_LEN);
+    strncpy(xfat->name, mount_name, XFAT_NAME_LEN);
+    xfat->name[XFAT_NAME_LEN - 1] = '\0';
+
+    // 检查是否已经存在同名的挂载点
+    if (xfat_find_by_name(xfat->name)) {
+        return FS_ERR_EXISTED;
+    }
+
+    xfat_list_add(xfat);
+    return FS_ERR_OK;
+}
+
+static xfat_err_t load_fsinfo_from_fat_tbl(xfat_t* xfat) {
+    xfat_err_t err;
+    u32_t cluster_bit_width = xfat_cluster_bit_width(xfat);
+    
+    xfat->cluster_total_free = 0;
+    xfat->cluster_next_free = 0;
+
+    // 字节对齐的簇查找
+    if (cluster_bit_width % 8 == 0) {
+        u32_t curr_sector = xfat->fat_start_sector;
+        u32_t sector_count = xfat->fat_tbl_sectors;
+
+        while (sector_count--) {
+            u32_t sector_size = xfat_get_disk(xfat)->sector_size;
+            u32_t cluster_byte_width = cluster_bit_width / 8;
+            xfat_buf_t * buf;
+            u32_t i;
+            u8_t * cluster_ptr;
+
+            err = xfat_bpool_read_sector(to_obj(xfat), &buf, curr_sector++);
+            if (err < 0) return err;
+
+            cluster_ptr = (u8_t *)(buf->buf);
+            for (i = 0; i < sector_size; i += cluster_byte_width, cluster_ptr += cluster_byte_width) {
+                if (get_cluster_value(xfat, cluster_ptr) == CLUSTER_FREE) {
+                    xfat->cluster_total_free++;
+
+                    if (xfat->cluster_next_free == 0) {
+                        xfat->cluster_next_free = i / cluster_bit_width;
+                    }
+                }
+            }
+        }
+    } else {    // FAT12
+
+    }
+
+    return FS_ERR_OK;
+}
+
+/**
+ *
+ * @param xfat xfat结构
+ * @param disk_part 分区结构
+ * @return
+ */
+static xfat_err_t load_cluster_free_info(xfat_t* xfat) {
+    xfat_err_t err = FS_ERR_OK;
+
+    if (xfat->feature.s.en_fsinfo) {
+        u32_t free_count = 0, next_free = 0;
+        xfat_buf_t* buf = 0;
+        fsinto_t* fsinfo;
+
+        err = xfat_bpool_read_sector(to_obj(xfat), &buf, xfat->fsi_sector + xfat->disk_part->start_sector);
+        if (err < 0) return err;
+
+        fsinfo = (fsinto_t*)(buf->buf);
+        if ((fsinfo->FSI_LoadSig == FSI_LOAD_SIG) && (fsinfo->FSI_StrucSig == FSI_STRUC_SIG)
+            && (fsinfo->FSI_TrailSig == FSI_TRAIL_SIG) && (fsinfo->FSI_Next_Free != 0xFFFFFFFF) &&
+            (fsinfo->FSI_Free_Count != 0xFFFFFFFF)) {
+            xfat->cluster_next_free = fsinfo->FSI_Next_Free;
+            xfat->cluster_total_free = fsinfo->FSI_Free_Count;
+            return FS_ERR_OK;
+        }
+    }
+
+    err = load_fsinfo_from_fat_tbl(xfat);
+    return err;
+}
+
+static xfat_err_t save_cluster_free_info(xdisk_t * disk, u32_t total_free, u32_t next_free,
+    u32_t fsinfo_sector, u32_t backup_sector) {
+    xfat_err_t err;
+    fsinto_t* fsinfo;
+    xfat_buf_t* buf;
+
+    err = xfat_bpool_alloc(to_obj(disk), &buf, fsinfo_sector);
+    if (err < 0) {
+        return err;
+    }
+    fsinfo = (fsinto_t*)buf->buf;
+
+    memset(fsinfo, 0, sizeof(fsinto_t));
+
+    fsinfo->FSI_LoadSig = FSI_LOAD_SIG;
+    fsinfo->FSI_StrucSig = FSI_STRUC_SIG;
+    fsinfo->FSI_Free_Count = total_free;
+    fsinfo->FSI_Next_Free = next_free;
+    fsinfo->FSI_TrailSig = FSI_TRAIL_SIG;
+
+    err = xfat_bpool_write_sector(to_obj(disk), buf);
+    if (err < 0) {
+        return err;
+    }
+
+    err = xfat_bpool_set_sector(to_obj(disk), buf, buf->sector_no + backup_sector);
+    if (err < 0) {
+        return err;
+    }
+
+    err = xfat_bpool_write_sector(to_obj(disk), buf);
+    if (err < 0) {
+        return err;
+    }
+
+    return FS_ERR_OK;
+}
+
+static xfat_err_t check_fs_feature (xfat_t * xfat) {
+    xfat->feature.v = 0;
+
+    if (is_part_fat32(xfat->disk_part)) {
+        xfat->feature.s.en_fsinfo = 1;
+    }
+
+    return FS_ERR_OK;
+}
+
+/**
+ * 初始化FAT项
+ * @param xfat xfat结构
+ * @param disk_part 分区结构
+ * @return
+ */
+xfat_err_t xfat_mount(xfat_t * xfat, xdisk_part_t * xdisk_part, const char * mount_name) {
+    dbr_t * dbr;
+    xdisk_t * xdisk = xdisk_part->disk;
+    xfat_err_t err;
+    xfat_buf_t * buf;
+
+    xfat_obj_init(&xfat->obj, XFAT_OBJ_FAT);
+
+    err = xfat_bpool_init(&xfat->obj, 0, 0, 0);
+    if (err < 0) {
+        return err;
+    }
+
+    xfat->disk_part = xdisk_part;
+
+    err = xfat_bpool_read_sector(to_obj(xfat), &buf, xdisk_part->start_sector);
+    if (err < 0) {
+        return err;
+    }
+    dbr = (dbr_t *)buf->buf;
+
+    // 解析dbr参数中的fat相关信息
+    err = parse_fat_header(xfat, dbr);
+    if (err < 0) {
+        return err;
+    }
+
+    err = check_fs_feature(xfat);
+    if (err < 0) {
+        return err;
+    }
+
+    err = load_cluster_free_info(xfat);
+    if (err < 0) {
+        return err;
+    }
+
+    // 添加至挂载点
+    err = add_to_mount(xfat, mount_name);
+    return err;
+}
+
+/**
+ * 解除文件系统的挂载
+ * @param xfat
+ */
+void xfat_unmount(xfat_t * xfat) {
+    if (xfat->feature.s.en_fsinfo) {
+        save_cluster_free_info(xfat_get_disk(xfat), xfat->cluster_total_free,
+                    xfat->cluster_next_free, xfat->fsi_sector, xfat->backup_sector);
+    }
+
+    xfat_bpool_flush(to_obj(xfat));
+    xfat_list_remove(xfat);
+}
+
+xfat_err_t xfat_set_buf(xfat_t* xfat, u8_t* buf, u32_t size) {
+    xfat_err_t err;
+    xdisk_part_t* part = xfat->disk_part;
+
+    err = xfat_bpool_flush_sectors(to_obj(xfat), part->start_sector, part->total_sector);
+    if (err < 0) {
+        return err;
+    }
+
+    err = xfat_bpool_invalid_sectors(to_obj(xfat), part->start_sector, part->total_sector);
+    if (err < 0) {
+        return err;
+    }
+
+    err = xfat_bpool_init(to_obj(xfat), xfat_get_disk(xfat)->sector_size, buf, size);
+    return err;
+}
+
+
+/**
+ * 初始化格式化参数，以给一个初始的缺省值
+ * @param ctrl 配置结构
+ * @return
+ */
+xfat_err_t xfat_fmt_ctrl_init(xfat_fmt_ctrl_t * ctrl) {
+    xfat_err_t err = FS_ERR_OK;
+
+    ctrl->type = FS_WIN95_FAT32_0;
+    ctrl->cluster_size = XFAT_CLUSTER_AUTO;
+    ctrl->vol_name = (const char*)0;
+    return err;
+}
+
+static xfat_err_t create_vol_id_label(xdisk_t * disk, xfat_fmt_ctrl_t * ctrl, dbr_t * dbr) {
+    xfat_err_t err;
+    xfile_time_t time;
+    u32_t sec;
+    u8_t * vol_lab;
+
+    err = xdisk_curr_time(disk, &time);
+    if (err < 0) {
+        return err;
+    }
+
+    sec = time.hour * 3600 + time.minute * 60 + time.second;
+    
+    if (xfs_cluster_bit_width(ctrl->type) <= 16) {
+        dbr->fat.fat12_16.BS_VolID = sec;
+        vol_lab = dbr->fat.fat12_16.BS_VolLab;
+   } else {
+        dbr->fat.fat32.BS_VolID = sec;
+        vol_lab = dbr->fat.fat32.BS_VolLab;
+    }
+
+    memcpy(vol_lab, "NO NAME    ", 11);
+    return FS_ERR_OK;
+}
+
+/**
+ * 计算所需要的fat表扇区数
+ * @param dbr dbr分区参数
+ * @param xdisk_part 分区信息
+ * @param ctrl 格式化控制参数
+ * @return 每个fat表项大小
+ */
+static u32_t cal_fat_tbl_sectors (dbr_t * dbr, xdisk_part_t * xdisk_part, xfat_fmt_ctrl_t * ctrl) {
+    // 保留区扇区数 + fat表数量 * fat表扇区数 + 数据区扇区数 = 总扇区数
+    // fat表扇区数 * 扇区大小 / 4 = 数据区扇区数 / 每簇扇区数
+    // fat表扇区数=(总扇区数-保留区扇区数)/(FAT表数量+扇区大小*每簇扇区数/4)
+    u32_t sector_size = xdisk_part->disk->sector_size;
+    u32_t fat_dat_sectors = xdisk_part->total_sector - dbr->bpb.BPB_RsvdSecCnt;
+    u32_t fat_sector_count = fat_dat_sectors / (dbr->bpb.BPB_NumFATs + sector_size * dbr->bpb.BPB_SecPerClus / sizeof(cluster32_t));
+
+    return fat_sector_count;
+}
+
+/**
+ * 获取默认的簇大小
+ * @param xdisk_part 待格式化的分区
+ * @param xfs_type 分区类型
+ * @return
+ */
+static u32_t get_default_cluster_size (xdisk_part_t * xdisk_part) {
+    u32_t sector_size = xdisk_part->disk->sector_size;
+    u64_t part_size = xdisk_part->total_sector * sector_size;
+    u32_t cluster_size;
+
+    if (part_size <= XFAT_MB(64)) {
+        cluster_size = XFAT_MAX(XFAT_CLUSTER_512B, sector_size);
+    } else if (part_size <= XFAT_MB(128)) {
+        cluster_size = XFAT_MAX(XFAT_CLUSTER_1K, sector_size);
+    } else if (part_size <= XFAT_MB(256)) {
+        cluster_size = XFAT_MAX(XFAT_CLUSTER_2K, sector_size);
+    } else if (part_size <= XFAT_GB(8)) {
+        cluster_size = XFAT_MAX(XFAT_CLUSTER_4K, sector_size);
+    } else if (part_size <= XFAT_GB(16)) {
+        cluster_size = XFAT_MAX(XFAT_CLUSTER_8K, sector_size);
+    } else if (part_size <= XFAT_GB(32)) {
+        cluster_size = XFAT_MAX(XFAT_CLUSTER_16K, sector_size);
+    } else {
+        cluster_size = XFAT_MAX(XFAT_CLUSTER_32K, sector_size);
+    }
+    return cluster_size;
+}
+
+/**
+ * 根据分区及格式化参数，创建dbr头
+ * @param dbr dbr头结构
+ * @param xdisk_part 分区结构
+ * @param ctrl 格式化参数
+ * @return
+ */
+static xfat_err_t create_dbr (xdisk_part_t * xdisk_part, xfat_fmt_ctrl_t * ctrl, xfat_fmt_info_t * fmt_info) {
+    xfat_err_t err;
+    xdisk_t * disk = xdisk_part->disk;
+    u32_t cluster_size;
+    dbr_t * dbr;
+    xfat_buf_t * buf;
+    u32_t cluster_bit_width = xfs_cluster_bit_width(ctrl->type);
+
+    // 计算簇大小，簇大小不能比扇区大小要小
+    if ((u32_t)ctrl->cluster_size < disk->sector_size) {
+        return FS_ERR_PARAM;
+    } else if (ctrl->cluster_size == XFAT_CLUSTER_AUTO) {
+        cluster_size = get_default_cluster_size(xdisk_part);
+    } else {
+        cluster_size = ctrl->cluster_size;
+    }
+
+    err = xfat_bpool_alloc(to_obj(disk), &buf,  xdisk_part->start_sector);
+    if (err < 0) {
+        return err;
+    }
+    dbr = (dbr_t*)buf->buf;
+
+    memset(dbr, 0, disk->sector_size);
+    ((u8_t*)dbr)[510] = 0x55;
+    ((u8_t*)dbr)[511] = 0xAA;
+
+    dbr->bpb.BS_jmpBoot[0] = 0xEB;          // 这几个跳转代码是必须的
+    dbr->bpb.BS_jmpBoot[1] = 0x58;          // 不加win会识别为未格式化
+    dbr->bpb.BS_jmpBoot[2] = 0x00;
+    strncpy((char *)dbr->bpb.BS_OEMName, "XFAT SYS", 8);
+    dbr->bpb.BPB_BytsPerSec = disk->sector_size;
+    dbr->bpb.BPB_SecPerClus = to_sector(disk, cluster_size);
+    dbr->bpb.BPB_RsvdSecCnt = 8478;         // 固定值为32，这里根据实际测试，设置为6182
+    dbr->bpb.BPB_NumFATs = 2;               // 固定为2
+    dbr->bpb.BPB_RootEntCnt = 0;            // FAT32未用
+    dbr->bpb.BPB_Media = 0xF8;              // 固定值
+    dbr->bpb.BPB_SecPerTrk = 0xFFFF;        // 不支持硬盘结构
+    dbr->bpb.BPB_NumHeads = 0xFFFF;         // 不支持硬盘结构
+    dbr->bpb.BPB_HiddSec = xdisk_part->relative_sector;    // 是否正确?
+    if (cluster_bit_width <= 16) {
+        dbr->bpb.BPB_RootEntCnt = 512;     
+        dbr->bpb.BPB_TotSec16 = xdisk_part->total_sector;
+        dbr->bpb.BPB_TotSec32 = 0;
+        dbr->bpb.BPB_FATSz16 = cal_fat_tbl_sectors(dbr, xdisk_part, ctrl);
+
+        dbr->fat.fat12_16.BS_DrvNum = 0x80;            // 固定为0
+        dbr->fat.fat12_16.BS_Reserved1 = 0;
+        dbr->fat.fat12_16.BS_BootSig = 0x29;           // 固定0x29
+        err = create_vol_id_label(disk, ctrl, dbr);
+        if (err < 0) {
+            return err;
+        }
+        memcpy(dbr->fat.fat12_16.BS_FileSysType, (cluster_bit_width == 12) ? "FAT12   " : "FAT116   ", 8);
+ 
+        err = xfat_bpool_write_sector(to_obj(disk), buf);
+        if (err < 0) {
+            return err;
+        }
+    } else {
+        dbr->bpb.BPB_RootEntCnt = 0;            // FAT32未用
+        dbr->bpb.BPB_TotSec16 = 0;              // FAT32未用
+        dbr->bpb.BPB_TotSec32 = xdisk_part->total_sector;
+        dbr->bpb.BPB_FATSz16 = 0;
+
+        dbr->fat.fat32.BPB_FATSz32 = cal_fat_tbl_sectors(dbr, xdisk_part, ctrl);
+        dbr->fat.fat32.BPB_ExtFlags = 0;            // 固定值，实时镜像所有FAT表
+        dbr->fat.fat32.BPB_FSVer = 0;               // 版本号，0
+        dbr->fat.fat32.BPB_RootClus = 2;            // 固定为2，如果为坏簇怎么办？
+        dbr->fat.fat32.BPB_FsInfo = 1;              // fsInfo的扇区号
+
+        memset(dbr->fat.fat32.BPB_Reserved, 0, 12);
+        dbr->fat.fat32.BS_DrvNum = 0x80;            // 固定为0
+        dbr->fat.fat32.BS_Reserved1 = 0;
+        dbr->fat.fat32.BS_BootSig = 0x29;           // 固定0x29
+        err = create_vol_id_label(disk, ctrl, dbr);
+        if (err < 0) {
+            return err;
+        }
+        memcpy(dbr->fat.fat32.BS_FileSysType, "FAT32   ", 8);
+
+        err = xfat_bpool_write_sector(to_obj(disk), buf);
+        if (err < 0) {
+            return err;
+        }
+      
+        // 同时在备份区中写一个备份
+        err = xfat_bpool_set_sector(to_obj(disk), buf, xdisk_part->start_sector + dbr->fat.fat32.BPB_BkBootSec);
+        if (err < 0) return err;
+
+        err = xfat_bpool_write_sector(to_obj(disk), buf);
+        if (err < 0) {
+            return err;
+        }
+    }
+
+    // 提取格式化相关的参数信息，避免占用内部缓冲区
+    fmt_info->fat_count = dbr->bpb.BPB_NumFATs;
+    fmt_info->media = dbr->bpb.BPB_Media;
+    fmt_info->sec_per_cluster = dbr->bpb.BPB_SecPerClus;
+    fmt_info->rsvd_sectors = dbr->bpb.BPB_RsvdSecCnt;
+
+    if (cluster_bit_width <= 16) {
+        fmt_info->fat_sectors = dbr->bpb.BPB_FATSz16;
+        fmt_info->root_cluster = 0;
+        fmt_info->backup_sector = 0;
+        fmt_info->fsinfo_sector = 0;
+    } else {
+        fmt_info->fat_sectors = dbr->fat.fat32.BPB_FATSz32;
+        fmt_info->root_cluster = dbr->fat.fat32.BPB_RootClus;
+        fmt_info->backup_sector = dbr->fat.fat32.BPB_BkBootSec;
+        fmt_info->fsinfo_sector = dbr->fat.fat32.BPB_FsInfo;
+    }
+    return err;
+}
+
+/**
+ * 检查是否支持指定的文件系统
+ */
+int xfat_is_fs_supported(xfs_type_t type) {
+    switch (type) {
+        case FS_FAT12:
+        case FS_FAT16:
+        case FS_WIN95_FAT32_0:
+        case FS_WIN95_FAT32_1:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/**
+ * 格式化FAT表
+ * @param dbr db结构
+ * @param xdisk_part 分区信息
+ * @param ctrl 格式化参数
+ * @return
+ */
+static xfat_err_t create_fat_table (xfat_fmt_info_t * fmt_info, xdisk_part_t * xdisk_part, xfat_fmt_ctrl_t * ctrl) {
+    u32_t i, j;
+    xdisk_t * disk = xdisk_part->disk;
+    cluster32_t * fat_buffer;
+    xfat_err_t err = FS_ERR_OK;
+    u32_t fat_start_sector = fmt_info->rsvd_sectors + xdisk_part->start_sector;
+    xfat_buf_t * buf;
+
+    // 分配临时缓存
+    err = xfat_bpool_alloc(to_obj(disk), &buf, fat_start_sector);
+    if (err < 0) {
+        return err;
+    }
+    fat_buffer = (cluster32_t *)buf->buf;
+
+    // 逐个写多个FAT表
+    memset(fat_buffer, 0, disk->sector_size);
+    for (i = 0; i < fmt_info->fat_count; i++) {
+        buf->sector_no = fat_start_sector + fmt_info->fat_sectors * i;
+
+        // 每个FAT表的前1、2簇已经被占用, 簇2分配给根目录，保留
+        fat_buffer[0].v = (u32_t)(0x0FFFFF00 | fmt_info->media);
+        fat_buffer[1].v = 0x0FFFFFFF;
+        fat_buffer[2].v = xfs_cluster_bit_width(ctrl->type) <= 16 ? 0x0: 0x0FFFFFFF;    // FAT12/16未占用
+        err = xfat_bpool_write_sector(to_obj(disk), buf);
+        if (err  < 0) {
+            return err;
+        }
+
+        // 再写其余扇区的簇
+        fat_buffer[0].v = fat_buffer[1].v = fat_buffer[2].v = 0;
+        for (j = 1; j < fmt_info->fat_sectors; j++) {
+            err = xfat_bpool_set_sector(to_obj(disk), buf, buf->sector_no + 1);
+            if (err < 0) return err;
+
+            err = xfat_bpool_write_sector(to_obj(disk), buf);
+            if (err  < 0) {
+                return err;
+            }
+        }
+    }
+    return err;
+}
+
+/**
+ * 创建根目录结构
+ * @param dbr dbr结构
+ * @param xdisk_part 分区信息
+ * @param ctrl 格式控制参数
+ * @return
+ */
+static xfat_err_t create_root_dir(xfat_fmt_info_t * fmt_info, xdisk_part_t * xdisk_part, xfat_fmt_ctrl_t * ctrl) {
+    xfat_err_t err;
+    int i;
+    xdisk_t * xdisk = xdisk_part->disk;
+    u32_t data_sector = fmt_info->rsvd_sectors             // 保留区
+            + (fmt_info->fat_count * fmt_info->fat_sectors)  // FAT区
+            + (fmt_info->root_cluster - 2) * fmt_info->sec_per_cluster;     // 数据区
+    diritem_t * diritem;
+    xfat_buf_t * buf;
+
+    err = xfat_bpool_alloc(to_obj(xdisk), &buf, xdisk_part->start_sector + data_sector);
+    if (err < 0) {
+        return err;
+    }
+    diritem = (diritem_t*)buf->buf;
+
+    // 擦除根目录所在的簇
+    memset(buf->buf, 0, xdisk->sector_size);
+    for (i = 0; i < fmt_info->sec_per_cluster; i++, buf->sector_no++) {
+        err = xfat_bpool_write_sector(to_obj(xdisk), buf);
+        if (err < 0) {
+            return err;
+        }
+    }
+
+    // 创建卷标目录
+    if (ctrl->vol_name) {
+        diritem_init_default(diritem, xdisk, 0, ctrl->vol_name ? ctrl->vol_name : "DISK", 0);
+        diritem->DIR_Attr |= DIRITEM_ATTR_VOLUME_ID;
+
+        err = xfat_bpool_set_sector(to_obj(xdisk), buf, xdisk_part->start_sector + data_sector);
+        if (err < 0) return err;
+
+        err = xfat_bpool_write_sector(to_obj(xdisk), buf);
+        if (err < 0) {
+            return err;
+        }
+    }
+
+    return FS_ERR_OK;
+}
+
+/**
+ * 创建fsinfo区
+ * @param dbr db结构
+ * @param xdisk_part 分区信息
+ * @param ctrl 格式化参数
+ * @return
+ */
+static xfat_err_t create_fsinfo(xfat_fmt_info_t * fmt_info, xdisk_part_t * xdisk_part, xfat_fmt_ctrl_t * ctrl) {
+    xfat_err_t err;
+    u32_t total_free;
+
+    // 可用数要减去根目录的
+    total_free = fmt_info->fat_sectors * xdisk_part->disk->sector_size / sizeof(cluster32_t) - (2 + 1);
+    err = save_cluster_free_info(xdisk_part->disk, total_free, 3, fmt_info->fsinfo_sector, fmt_info->backup_sector);
+    return err;
+}
+
+/**
+ * 回写分区表
+ * @param xdisk_part
+ * @param ctrl
+ * @return
+ */
+xfat_err_t rewrite_partition_table(xdisk_part_t* xdisk_part, xfat_fmt_ctrl_t* ctrl) {
+    xfat_err_t err = xdisk_set_part_type(xdisk_part, ctrl->type);
+    return err;
+}
+
+/**
+ * 格式化FAT文件系统
+ * @param xdisk_part 分区结构
+ * @param ctrl 格式化参数
+ * @return
+ */
+xfat_err_t xfat_format (xdisk_part_t * xdisk_part, xfat_fmt_ctrl_t * ctrl) {
+    xfat_err_t err;
+    xfat_fmt_info_t fmt_info;
+
+    // 文件系统支持检查
+    if (!xfat_is_fs_supported(ctrl->type)) {
+        return FS_ERR_INVALID_FS;
+    }
+
+    // 创建dbr头
+    err = create_dbr(xdisk_part, ctrl, &fmt_info);
+    if (err < 0) {
+        return err;
+    }
+
+    // 写FAT区
+    err = create_fat_table(&fmt_info, xdisk_part, ctrl);
+    if (err < 0) {
+        return err;
+    }
+
+    // 创建首目录区
+    err = create_root_dir(&fmt_info, xdisk_part, ctrl);
+    if (err < 0) {
+        return err;
+    }
+
+    // 写fsinfo区，备份区
+    if (xfs_cluster_bit_width(ctrl->type) == 32) {
+        err = create_fsinfo(&fmt_info, xdisk_part, ctrl);
+        if (err < 0) {
+            return err;
+        }
+    }
+
+    err = rewrite_partition_table(xdisk_part, ctrl);
+    if (err < 0) {
+        return err;
+    }
+
+    return err;
+}
+
+/**
  * 将指定的name按FAT 8+3命名转换
  * @param dest_name
  * @param my_name
@@ -426,7 +1142,7 @@ static xfat_err_t to_sfn(char* dest_name, const char* my_name) {
     const char * p;
     int ext_existed;
 
-    xlib_memset(dest, ' ', SFN_LEN);
+    memset(dest, ' ', SFN_LEN);
 
     // 跳过开头的分隔符
     while (is_path_sep(*my_name)) {
@@ -460,14 +1176,14 @@ static xfat_err_t to_sfn(char* dest_name, const char* my_name) {
                 continue;
             }
             else if (p < ext_dot) {
-                *dest++ = xlib_toupper(*p++);
+                *dest++ = toupper(*p++);
             }
             else {
-                *dest++ = xlib_toupper(*p++);
+                *dest++ = toupper(*p++);
             }
         }
         else {
-            *dest++ = xlib_toupper(*p++);
+            *dest++ = toupper(*p++);
         }
     }
     return FS_ERR_OK;
@@ -511,12 +1227,12 @@ static u8_t get_sfn_case_cfg(const char * sfn_name) {
     for (p = src_name; p < src_name + name_len; p++) {
         if (ext_existed) {
             if (p < ext_dot) { // 文件名主体部分大小写判断
-                case_cfg |= xlib_islower(*p) ? DIRITEM_NTRES_BODY_LOWER : 0;
+                case_cfg |= islower(*p) ? DIRITEM_NTRES_BODY_LOWER : 0;
             } else if (p > ext_dot) {
-                case_cfg |= xlib_islower(*p) ? DIRITEM_NTRES_EXT_LOWER : 0;
+                case_cfg |= islower(*p) ? DIRITEM_NTRES_EXT_LOWER : 0;
             }
         } else {
-            case_cfg |= xlib_islower(*p) ? DIRITEM_NTRES_BODY_LOWER : 0;
+            case_cfg |= islower(*p) ? DIRITEM_NTRES_BODY_LOWER : 0;
         }
     }
 
@@ -536,7 +1252,7 @@ static u8_t is_filename_match(const char *name_in_dir, const char *to_find_name)
     // 根据目录的大小写配置，将其转换成8+3名称，再进行逐字节比较
     // 但实际显示时，会根据diritem->NTRes进行大小写转换
     to_sfn(temp_name, to_find_name);
-    return xlib_memcmp(temp_name, name_in_dir, SFN_LEN) == 0;
+    return memcmp(temp_name, name_in_dir, SFN_LEN) == 0;
 }
 
 /**
@@ -634,7 +1350,7 @@ static void sfn_to_myname(char *dest_name, const diritem_t * diritem) {
     u8_t ext_exist = raw_name[8] != 0x20;
     u8_t scan_len = ext_exist ? SFN_LEN + 1 : SFN_LEN;
 
-    xlib_memset(dest_name, 0, X_FILEINFO_NAME_SIZE);
+    memset(dest_name, 0, X_FILEINFO_NAME_SIZE);
 
     // 要考虑大小写问题，根据NTRes配置转换成相应的大小写
     for (i = 0; i < scan_len; i++) {
@@ -650,7 +1366,7 @@ static void sfn_to_myname(char *dest_name, const diritem_t * diritem) {
                 lower = 1;
             }
 
-            *dest++ = lower ? xlib_tolower(*raw_name++) : xlib_toupper(*raw_name++);
+            *dest++ = lower ? tolower(*raw_name++) : toupper(*raw_name++);
         }
     }
     *dest = '\0';
@@ -674,45 +1390,6 @@ static void set_diritem_cluster (diritem_t * item, u32_t cluster) {
 static u32_t get_diritem_cluster (diritem_t * item) {
     return (item->DIR_FstClusHI << 16) | item->DIR_FstClusL0;
 }
-
-/**
- * 缺省初始化driitem
- * @param dir_item 待初始化的diritem
- * @param is_dir 该项是否对应目录项
- * @param name 项的名称
- * @param cluster 数据簇的起始簇号
- * @return
- */
-static xfat_err_t diritem_init_default(diritem_t* dir_item, xdisk_t* disk, u8_t is_dir, const char* name, u32_t cluster) {
-	xfile_time_t timeinfo;
-
-	xfat_err_t err = xdisk_curr_time(disk, &timeinfo);
-	if (err < 0) {
-		return err;
-	}
-
-	to_sfn((char*)dir_item->DIR_Name, name);
-	set_diritem_cluster(dir_item, cluster);
-	dir_item->DIR_FileSize = 0;
-	dir_item->DIR_Attr = (u8_t)(is_dir ? DIRITEM_ATTR_DIRECTORY : 0);
-	dir_item->DIR_NTRes = get_sfn_case_cfg(name);
-
-	dir_item->DIR_CrtTime.hour = timeinfo.hour;
-	dir_item->DIR_CrtTime.minute = timeinfo.minute;
-	dir_item->DIR_CrtTime.second_2 = (u16_t)(timeinfo.second / 2);
-	dir_item->DIR_CrtTimeTeenth = (u8_t)((timeinfo.second & 1) * 1000);
-
-	dir_item->DIR_CrtDate.year_from_1980 = (u16_t)(timeinfo.year - 1980);
-	dir_item->DIR_CrtDate.month = timeinfo.month;
-	dir_item->DIR_CrtDate.day = timeinfo.day;
-
-	dir_item->DIR_WrtTime = dir_item->DIR_CrtTime;
-	dir_item->DIR_WrtDate = dir_item->DIR_CrtDate;
-	dir_item->DIR_LastAccDate = dir_item->DIR_CrtDate;
-
-	return FS_ERR_OK;
-}
-
 
 /**
  * 移动簇的位置
@@ -842,8 +1519,8 @@ static u8_t is_locate_type_match (diritem_t * dir_item, u8_t locate_type) {
         match = 0;  // 不显示隐藏文件
     } else if ((dir_item->DIR_Attr & DIRITEM_ATTR_VOLUME_ID) && !(locate_type & XFILE_LOCATE_VOL)) {
         match = 0;  // 不显示卷标
-    } else if ((xlib_memcmp(DOT_FILE, dir_item->DIR_Name, SFN_LEN) == 0)
-                || (xlib_memcmp(DOT_DOT_FILE, dir_item->DIR_Name, SFN_LEN) == 0)) {
+    } else if ((memcmp(DOT_FILE, dir_item->DIR_Name, SFN_LEN) == 0)
+                || (memcmp(DOT_DOT_FILE, dir_item->DIR_Name, SFN_LEN) == 0)) {
         if (!(locate_type & XFILE_LOCATE_DOT)) {
             match = 0;// 不显示dot文件
         }
@@ -932,587 +1609,6 @@ static xfat_err_t locate_file_dir_item(xfat_t *xfat, u8_t locate_type, u32_t *di
 }
 
 /**
- * 初始化xfat文件系统
- * @return
- */
-xfat_err_t xfat_init(void) {
-	xfat_list_init();
-	return FS_ERR_OK;
-}
-
-/**
- * 从dbr中解析出fat相关配置参数
- * @param dbr 读取的设备dbr
- * @return
- */
-static xfat_err_t parse_fat_header(xfat_t* xfat, dbr_t* dbr) {
-	xdisk_part_t* xdisk_part = xfat->disk_part;
-
-	// 解析DBR参数，解析出有用的参数
-	xfat->root_cluster = dbr->fat32.BPB_RootClus;
-	xfat->fat_tbl_sectors = dbr->fat32.BPB_FATSz32;
-
-	// 如果禁止FAT镜像，只刷新一个FAT表
-	// disk_part->start_block为该分区的绝对物理扇区号，所以不需要再加上Hidden_sector
-	if (dbr->fat32.BPB_ExtFlags & (1 << 7)) {
-		u32_t table = dbr->fat32.BPB_ExtFlags & 0xF;
-		xfat->fat_start_sector = dbr->bpb.BPB_RsvdSecCnt + xdisk_part->start_sector + table * xfat->fat_tbl_sectors;
-		xfat->fat_tbl_nr = 1;
-	}
-	else {
-		xfat->fat_start_sector = dbr->bpb.BPB_RsvdSecCnt + xdisk_part->start_sector;
-		xfat->fat_tbl_nr = dbr->bpb.BPB_NumFATs;
-	}
-
-	xfat->sec_per_cluster = dbr->bpb.BPB_SecPerClus;
-	xfat->total_sectors = dbr->bpb.BPB_TotSec32;
-	xfat->cluster_byte_size = xfat->sec_per_cluster * dbr->bpb.BPB_BytsPerSec;
-	xfat->fsi_sector = dbr->fat32.BPB_FsInfo;
-	xfat->backup_sector = dbr->fat32.BPB_BkBootSec;
-
-	return FS_ERR_OK;
-}
-
-/**
- * 将xfat添加至指定的挂载点
- * @param xfat xfat结构
- * @param mount_name 挂载点名称
- * @return
- */
-xfat_err_t add_to_mount(xfat_t* xfat, const char* mount_name) {
-	xlib_memset(xfat->name, 0, XFAT_NAME_LEN);
-	xlib_strncpy(xfat->name, mount_name, XFAT_NAME_LEN);
-	xfat->name[XFAT_NAME_LEN - 1] = '\0';
-
-	// 检查是否已经存在同名的挂载点
-	if (xfat_find_by_name(xfat->name)) {
-		return FS_ERR_EXISTED;
-	}
-
-	xfat_list_add(xfat);
-	return FS_ERR_OK;
-}
-
-/**
- *
- * @param xfat xfat结构
- * @param disk_part 分区结构
- * @return
- */
-static xfat_err_t load_cluster_free_info(xfat_t* xfat) {
-	xfat_err_t err = FS_ERR_OK;
-	u32_t free_count = 0, next_free = 0;
-	xfat_buf_t* buf = 0;
-	fsinto_t* fsinfo;
-
-	err = xfat_bpool_read_sector(to_obj(xfat), &buf, xfat->fsi_sector + xfat->disk_part->start_sector);
-	if (err < 0) return err;
-
-	fsinfo = (fsinto_t*)(buf->buf);
-	if ((fsinfo->FSI_LoadSig == 0x41615252) && (fsinfo->FSI_StrucSig == 0x61417272)
-		&& (fsinfo->FSI_TrailSig == 0xAA550000) && (fsinfo->FSI_Next_Free != 0xFFFFFFFF) &&
-		(fsinfo->FSI_Free_Count != 0xFFFFFFFF)) {
-		xfat->cluster_next_free = fsinfo->FSI_Next_Free;
-		xfat->cluster_total_free = fsinfo->FSI_Free_Count;
-	}
-	else {
-		u32_t sector_size = xfat_get_disk(xfat)->sector_size;
-		u32_t start_sector = xfat->fat_start_sector;
-		u32_t sector_count = xfat->fat_tbl_sectors;
-		while (sector_count--) {
-			u32_t i;
-			cluster32_t* cluster;
-
-			err = xfat_bpool_read_sector(to_obj(xfat), &buf, start_sector++);
-			if (err < 0) return err;
-
-			cluster = (cluster32_t*)(buf->buf);
-			for (i = 0; i < sector_size; i += sizeof(cluster32_t), cluster++) {
-				if (cluster->s.next == CLUSTER_FREE) {
-					free_count++;
-
-					if (next_free == 0) {
-						next_free = i / sizeof(cluster32_t);
-					}
-				}
-			}
-		}
-
-		xfat->cluster_next_free = next_free;
-		xfat->cluster_total_free = free_count;
-	}
-
-	return err;
-}
-
-static xfat_err_t save_cluster_free_info(xdisk_t* disk, u32_t total_free, u32_t next_free,
-	u32_t fsinfo_sector, u32_t backup_sector) {
-	xfat_err_t err;
-	fsinto_t* fsinfo;
-	xfat_buf_t* buf;
-
-	err = xfat_bpool_alloc(to_obj(disk), &buf, fsinfo_sector);
-	if (err < 0) {
-		return err;
-	}
-	fsinfo = (fsinto_t*)buf->buf;
-
-	xlib_memset(fsinfo, 0, sizeof(fsinto_t));
-
-	fsinfo->FSI_LoadSig = 0x41615252;
-	fsinfo->FSI_StrucSig = 0x61417272;
-	fsinfo->FSI_Free_Count = total_free;
-	fsinfo->FSI_Next_Free = next_free;
-	fsinfo->FSI_TrailSig = 0xAA550000;
-
-	err = xfat_bpool_write_sector(to_obj(disk), buf, 1);
-	if (err < 0) {
-		return err;
-	}
-
-	// 同时在备份区中写一个备份
-	buf->sector_no += backup_sector;
-	err = xfat_bpool_write_sector(to_obj(disk), buf, 0);
-	if (err < 0) {
-		return err;
-	}
-
-	return FS_ERR_OK;
-}
-
-/**
- * 初始化FAT项
- * @param xfat xfat结构
- * @param disk_part 分区结构
- * @return
- */
-xfat_err_t xfat_mount(xfat_t* xfat, xdisk_part_t* xdisk_part, const char* mount_name) {
-	dbr_t* dbr;
-	xdisk_t* xdisk = xdisk_part->disk;
-	xfat_err_t err;
-	xfat_buf_t* buf;
-
-	xfat_obj_init(&xfat->obj, XFAT_OBJ_FAT);
-
-	err = xfat_bpool_init(&xfat->obj, 0, 0, 0);
-	if (err < 0) {
-		return err;
-	}
-
-	xfat->disk_part = xdisk_part;
-
-	err = xfat_bpool_read_sector(to_obj(xfat), &buf, xdisk_part->start_sector);
-	if (err < 0) {
-		return err;
-	}
-	dbr = (dbr_t*)buf->buf;
-
-	// 解析dbr参数中的fat相关信息
-	err = parse_fat_header(xfat, dbr);
-	if (err < 0) {
-		return err;
-	}
-
-	err = load_cluster_free_info(xfat);
-	if (err < 0) {
-		return err;
-	}
-
-	// 添加至挂载点
-	err = add_to_mount(xfat, mount_name);
-	return err;
-}
-
-/**
- * 解除文件系统的挂载
- * @param xfat
- */
-void xfat_unmount(xfat_t* xfat) {
-	save_cluster_free_info(xfat_get_disk(xfat), xfat->cluster_total_free,
-		xfat->cluster_next_free, xfat->fsi_sector, xfat->backup_sector);
-	xfat_bpool_flush(to_obj(xfat));
-	xfat_list_remove(xfat);
-}
-
-xfat_err_t xfat_set_buf(xfat_t* xfat, u8_t* buf, u32_t size) {
-	xfat_err_t err;
-	xdisk_part_t* part = xfat->disk_part;
-
-	err = xfat_bpool_flush_sectors(to_obj(xfat), part->start_sector, part->total_sector);
-	if (err < 0) {
-		return err;
-	}
-
-	err = xfat_bpool_invalid_sectors(to_obj(xfat), part->start_sector, part->total_sector);
-	if (err < 0) {
-		return err;
-	}
-
-	err = xfat_bpool_init(to_obj(xfat), xfat_get_disk(xfat)->sector_size, buf, size);
-	return err;
-}
-
-
-/**
- * 初始化格式化参数，以给一个初始的缺省值
- * @param ctrl 配置结构
- * @return
- */
-xfat_err_t xfat_fmt_ctrl_init(xfat_fmt_ctrl_t* ctrl) {
-	xfat_err_t err = FS_ERR_OK;
-
-	ctrl->type = FS_WIN95_FAT32_0;
-	ctrl->cluster_size = XFAT_CLUSTER_AUTO;
-	ctrl->vol_name = (const char*)0;
-	return err;
-}
-
-static xfat_err_t create_vol_id_label(xdisk_t* disk, dbr_t* dbr) {
-	xfat_err_t err;
-	xfile_time_t time;
-	u32_t sec;
-
-	err = xdisk_curr_time(disk, &time);
-	if (err < 0) {
-		return err;
-	}
-
-	sec = time.hour * 3600 + time.minute * 60 + time.second;
-	dbr->fat32.BS_VolID = sec;
-	xlib_memcpy(dbr->fat32.BS_VolLab, "NO NAME    ", 11);
-	return FS_ERR_OK;
-}
-
-/**
- * 计算所需要的fat表扇区数
- * @param dbr dbr分区参数
- * @param xdisk_part 分区信息
- * @param ctrl 格式化控制参数
- * @return 每个fat表项大小
- */
-static u32_t cal_fat_tbl_sectors(dbr_t* dbr, xdisk_part_t* xdisk_part, xfat_fmt_ctrl_t* ctrl) {
-	// 保留区扇区数 + fat表数量 * fat表扇区数 + 数据区扇区数 = 总扇区数
-	// fat表扇区数 * 扇区大小 / 4 = 数据区扇区数 / 每簇扇区数
-	// fat表扇区数=(总扇区数-保留区扇区数)/(FAT表数量+扇区大小*每簇扇区数/4)
-	u32_t sector_size = xdisk_part->disk->sector_size;
-	u32_t fat_dat_sectors = xdisk_part->total_sector - dbr->bpb.BPB_RsvdSecCnt;
-	u32_t fat_sector_count = fat_dat_sectors / (dbr->bpb.BPB_NumFATs + (u64_t)sector_size * dbr->bpb.BPB_SecPerClus / sizeof(cluster32_t));
-
-	return fat_sector_count;
-}
-
-/**
- * 获取默认的簇大小
- * @param xdisk_part 待格式化的分区
- * @param xfs_type 分区类型
- * @return
- */
-static u32_t get_default_cluster_size(xdisk_part_t* xdisk_part) {
-	u32_t sector_size = xdisk_part->disk->sector_size;
-	u64_t part_size = (u64_t)xdisk_part->total_sector * sector_size;
-	u32_t cluster_size;
-
-	if (part_size <= XFAT_MB(64)) {
-		cluster_size = XFAT_MAX(XFAT_CLUSTER_512B, sector_size);
-	}
-	else if (part_size <= XFAT_MB(128)) {
-		cluster_size = XFAT_MAX(XFAT_CLUSTER_1K, sector_size);
-	}
-	else if (part_size <= XFAT_MB(256)) {
-		cluster_size = XFAT_MAX(XFAT_CLUSTER_2K, sector_size);
-	}
-	else if (part_size <= XFAT_GB(8)) {
-		cluster_size = XFAT_MAX(XFAT_CLUSTER_4K, sector_size);
-	}
-	else if (part_size <= XFAT_GB(16)) {
-		cluster_size = XFAT_MAX(XFAT_CLUSTER_8K, sector_size);
-	}
-	else if (part_size <= XFAT_GB(32)) {
-		cluster_size = XFAT_MAX(XFAT_CLUSTER_16K, sector_size);
-	}
-	else {
-		cluster_size = XFAT_MAX(XFAT_CLUSTER_32K, sector_size);
-	}
-	return cluster_size;
-}
-
-/**
- * 根据分区及格式化参数，创建dbr头
- * @param dbr dbr头结构
- * @param xdisk_part 分区结构
- * @param ctrl 格式化参数
- * @return
- */
-static xfat_err_t create_dbr(xdisk_part_t* xdisk_part, xfat_fmt_ctrl_t* ctrl, xfat_fmt_info_t* fmt_info) {
-	xfat_err_t err;
-	xdisk_t* disk = xdisk_part->disk;
-	u32_t cluster_size;
-	dbr_t* dbr;
-	xfat_buf_t* buf;
-
-	// 计算簇大小，簇大小不能比扇区大小要小
-	if ((u32_t)ctrl->cluster_size < disk->sector_size) {
-		return FS_ERR_PARAM;
-	}
-	else if (ctrl->cluster_size == XFAT_CLUSTER_AUTO) {
-		cluster_size = get_default_cluster_size(xdisk_part);
-	}
-	else {
-		cluster_size = ctrl->cluster_size;
-	}
-
-	err = xfat_bpool_alloc(to_obj(disk), &buf, xdisk_part->start_sector);
-	if (err < 0) {
-		return err;
-	}
-	dbr = (dbr_t*)buf->buf;
-
-	xlib_memset(dbr, 0, disk->sector_size);
-	dbr->bpb.BS_jmpBoot[0] = 0xEB;          // 这几个跳转代码是必须的
-	dbr->bpb.BS_jmpBoot[1] = 0x58;          // 不加win会识别为未格式化
-	dbr->bpb.BS_jmpBoot[2] = 0x00;
-	xlib_strncpy((char*)dbr->bpb.BS_OEMName, "XFAT SYS", 8);
-	dbr->bpb.BPB_BytsPerSec = disk->sector_size;
-	dbr->bpb.BPB_SecPerClus = to_sector(disk, cluster_size);
-	dbr->bpb.BPB_RsvdSecCnt = 8478;         // 固定值为32，这里根据实际测试，设置为6182
-	dbr->bpb.BPB_NumFATs = 2;               // 固定为2
-	dbr->bpb.BPB_RootEntCnt = 0;            // FAT32未用
-	dbr->bpb.BPB_TotSec16 = 0;              // FAT32未用
-	dbr->bpb.BPB_Media = 0xF8;              // 固定值
-	dbr->bpb.BPB_FATSz16 = 0;               // FAT32未用
-	dbr->bpb.BPB_SecPerTrk = 0xFFFF;        // 不支持硬盘结构
-	dbr->bpb.BPB_NumHeads = 0xFFFF;         // 不支持硬盘结构
-	dbr->bpb.BPB_HiddSec = xdisk_part->relative_sector;    // 是否正确?
-	dbr->bpb.BPB_TotSec32 = xdisk_part->total_sector;
-	dbr->fat32.BPB_FATSz32 = cal_fat_tbl_sectors(dbr, xdisk_part, ctrl);
-	dbr->fat32.BPB_ExtFlags = 0;            // 固定值，实时镜像所有FAT表
-	dbr->fat32.BPB_FSVer = 0;               // 版本号，0
-	dbr->fat32.BPB_RootClus = 2;            // 固定为2，如果为坏簇怎么办？
-	dbr->fat32.BPB_FsInfo = 1;              // fsInfo的扇区号
-
-	xlib_memset(dbr->fat32.BPB_Reserved, 0, 12);
-	dbr->fat32.BS_DrvNum = 0x80;            // 固定为0
-	dbr->fat32.BS_Reserved1 = 0;
-	dbr->fat32.BS_BootSig = 0x29;           // 固定0x29
-	err = create_vol_id_label(disk, dbr);
-	if (err < 0) {
-		return err;
-	}
-	xlib_memcpy(dbr->fat32.BS_FileSysType, "FAT32   ", 8);
-
-	((u8_t*)dbr)[510] = 0x55;
-	((u8_t*)dbr)[511] = 0xAA;
-
-	err = xfat_bpool_write_sector(to_obj(disk), buf, 1);
-	if (err < 0) {
-		return err;
-	}
-
-	// 同时在备份区中写一个备份
-	buf->sector_no = xdisk_part->start_sector + dbr->fat32.BPB_BkBootSec;
-	err = xfat_bpool_write_sector(to_obj(disk), buf, 0);
-	if (err < 0) {
-		return err;
-	}
-
-	// 提取格式化相关的参数信息，避免占用内部缓冲区
-	fmt_info->fat_count = dbr->bpb.BPB_NumFATs;
-	fmt_info->media = dbr->bpb.BPB_Media;
-	fmt_info->fat_sectors = dbr->fat32.BPB_FATSz32;
-	fmt_info->rsvd_sectors = dbr->bpb.BPB_RsvdSecCnt;
-	fmt_info->root_cluster = dbr->fat32.BPB_RootClus;
-	fmt_info->sec_per_cluster = dbr->bpb.BPB_SecPerClus;
-	fmt_info->backup_sector = dbr->fat32.BPB_BkBootSec;
-	fmt_info->fsinfo_sector = dbr->fat32.BPB_FsInfo;
-	return err;
-}
-
-/**
- * 检查是否支持指定的文件系统
- */
-int xfat_is_fs_supported(xfs_type_t type) {
-	switch (type) {
-	case FS_FAT32:
-	case FS_WIN95_FAT32_0:
-	case FS_WIN95_FAT32_1:
-		return 1;
-	default:
-		return 0;
-	}
-}
-
-/**
- * 格式化FAT表
- * @param dbr db结构
- * @param xdisk_part 分区信息
- * @param ctrl 格式化参数
- * @return
- */
-static xfat_err_t create_fat_table(xfat_fmt_info_t* fmt_info, xdisk_part_t* xdisk_part, xfat_fmt_ctrl_t* ctrl) {
-	u32_t i, j;
-	xdisk_t* disk = xdisk_part->disk;
-	cluster32_t* fat_buffer;
-	xfat_err_t err = FS_ERR_OK;
-	u32_t fat_start_sector = fmt_info->rsvd_sectors + xdisk_part->start_sector;
-	xfat_buf_t* buf;
-
-	// 分配临时缓存
-	err = xfat_bpool_alloc(to_obj(disk), &buf, fat_start_sector);
-	if (err < 0) {
-		return err;
-	}
-	fat_buffer = (cluster32_t*)buf->buf;
-
-	// 逐个写多个FAT表
-	xlib_memset(fat_buffer, 0, disk->sector_size);
-	for (i = 0; i < fmt_info->fat_count; i++) {
-		buf->sector_no = fat_start_sector + fmt_info->fat_sectors * i;
-
-		// 每个FAT表的前1、2簇已经被占用, 簇2分配给根目录，保留
-		fat_buffer[0].v = (u32_t)(0x0FFFFF00 | fmt_info->media);
-		fat_buffer[1].v = 0x0FFFFFFF;
-		fat_buffer[2].v = 0x0FFFFFFF;
-		err = xfat_bpool_write_sector(to_obj(disk), buf, 1);
-		if (err < 0) {
-			return err;
-		}
-
-		// 再写其余扇区的簇
-		fat_buffer[0].v = fat_buffer[1].v = fat_buffer[2].v = 0;
-		for (j = 1; j < fmt_info->fat_sectors; j++) {
-			++buf->sector_no;
-			err = xfat_bpool_write_sector(to_obj(disk), buf, 1);
-			if (err < 0) {
-				return err;
-			}
-		}
-	}
-	return err;
-}
-
-/**
- * 创建根目录结构
- * @param dbr dbr结构
- * @param xdisk_part 分区信息
- * @param ctrl 格式控制参数
- * @return
- */
-static xfat_err_t create_root_dir(xfat_fmt_info_t* fmt_info, xdisk_part_t* xdisk_part, xfat_fmt_ctrl_t* ctrl) {
-	xfat_err_t err;
-	int i;
-	xdisk_t* xdisk = xdisk_part->disk;
-	u32_t data_sector = fmt_info->rsvd_sectors             // 保留区
-		+ (fmt_info->fat_count * fmt_info->fat_sectors)  // FAT区
-		+ (fmt_info->root_cluster - 2) * fmt_info->sec_per_cluster;     // 数据区
-	diritem_t* diritem;
-	xfat_buf_t* buf;
-
-	err = xfat_bpool_alloc(to_obj(xdisk), &buf, xdisk_part->start_sector + data_sector);
-	if (err < 0) {
-		return err;
-	}
-	diritem = (diritem_t*)buf->buf;
-
-	// 擦除根目录所在的簇
-	xlib_memset(buf->buf, 0, xdisk->sector_size);
-	for (i = 0; i < fmt_info->sec_per_cluster; i++, buf->sector_no++) {
-		err = xfat_bpool_write_sector(to_obj(xdisk), buf, 1);
-		if (err < 0) {
-			return err;
-		}
-	}
-
-	// 创建卷标目录
-	if (ctrl->vol_name) {
-		diritem_init_default(diritem, xdisk, 0, ctrl->vol_name ? ctrl->vol_name : "DISK", 0);
-		diritem->DIR_Attr |= DIRITEM_ATTR_VOLUME_ID;
-
-		buf->sector_no = xdisk_part->start_sector + data_sector;
-		err = xfat_bpool_write_sector(to_obj(xdisk), buf, 0);
-		if (err < 0) {
-			return err;
-		}
-	}
-
-	return FS_ERR_OK;
-}
-
-/**
- * 创建fsinfo区
- * @param dbr db结构
- * @param xdisk_part 分区信息
- * @param ctrl 格式化参数
- * @return
- */
-static xfat_err_t create_fsinfo(xfat_fmt_info_t* fmt_info, xdisk_part_t* xdisk_part, xfat_fmt_ctrl_t* ctrl) {
-	xfat_err_t err;
-	u32_t total_free;
-
-	// 可用数要减去根目录的
-	total_free = (u64_t)fmt_info->fat_sectors * xdisk_part->disk->sector_size / sizeof(cluster32_t) - (2 + 1);
-	err = save_cluster_free_info(xdisk_part->disk, total_free, 3, fmt_info->fsinfo_sector, fmt_info->backup_sector);
-	return err;
-}
-
-/**
- * 回写分区表
- * @param xdisk_part
- * @param ctrl
- * @return
- */
-xfat_err_t rewrite_partition_table(xdisk_part_t* xdisk_part, xfat_fmt_ctrl_t* ctrl) {
-	xfat_err_t err = xdisk_set_part_type(xdisk_part, ctrl->type);
-	return err;
-}
-
-/**
- * 格式化FAT文件系统
- * @param xdisk_part 分区结构
- * @param ctrl 格式化参数
- * @return
- */
-xfat_err_t xfat_format(xdisk_part_t* xdisk_part, xfat_fmt_ctrl_t* ctrl) {
-	xfat_err_t err;
-	xfat_fmt_info_t fmt_info;
-
-	// 文件系统支持检查
-	if (!xfat_is_fs_supported(ctrl->type)) {
-		return FS_ERR_INVALID_FS;
-	}
-
-	// 创建dbr头
-	err = create_dbr(xdisk_part, ctrl, &fmt_info);
-	if (err < 0) {
-		return err;
-	}
-
-	// 写FAT区
-	err = create_fat_table(&fmt_info, xdisk_part, ctrl);
-	if (err < 0) {
-		return err;
-	}
-
-	// 创建首目录区
-	err = create_root_dir(&fmt_info, xdisk_part, ctrl);
-	if (err < 0) {
-		return err;
-	}
-
-	// 写fsinfo区，备份区
-	err = create_fsinfo(&fmt_info, xdisk_part, ctrl);
-	if (err < 0) {
-		return err;
-	}
-
-	err = rewrite_partition_table(xdisk_part, ctrl);
-	if (err < 0) {
-		return err;
-	}
-
-	return err;
-}
-
-/**
  * 打开指定dir_cluster开始的簇链中包含的子文件。
  * 如果path为空，则以dir_cluster创建一个打开的目录对像
  * @param xfat xfat结构
@@ -1566,7 +1662,7 @@ static xfat_err_t open_sub_file (xfat_t * xfat, u32_t dir_cluster, xfile_t * fil
                 file_start_cluster = get_diritem_cluster(dir_item);
 
                 // 如果是..且对应根目录，则cluster值为0，需加载正确的值
-                if ((xlib_memcmp(dir_item->DIR_Name, DOT_DOT_FILE, SFN_LEN) == 0) && (file_start_cluster == 0)) {
+                if ((memcmp(dir_item->DIR_Name, DOT_DOT_FILE, SFN_LEN) == 0) && (file_start_cluster == 0)) {
                     file_start_cluster = xfat->root_cluster;
                 }
             }
@@ -1618,9 +1714,9 @@ xfat_err_t xfile_open(xfile_t * file, const char * path) {
 
         // 根目录不存在上级目录
         // 若含有.，直接过滤掉路径
-        if (xlib_memcmp(path, "..", 2) == 0) {
+        if (memcmp(path, "..", 2) == 0) {
             return FS_ERR_NONE;
-        } else if (xlib_memcmp(path, ".", 1) == 0) {
+        } else if (memcmp(path, ".", 1) == 0) {
             path++;
         }
     }
@@ -1640,7 +1736,7 @@ xfat_err_t xfile_open_sub(xfile_t* dir, const char* sub_path, xfile_t* sub_file)
         return FS_ERR_PARAM;
     }
 
-    if (xlib_memcmp(sub_path, ".", 1) == 0) {
+    if (memcmp(sub_path, ".", 1) == 0) {
         return FS_ERR_PARAM;
     }
 
@@ -1747,6 +1843,44 @@ void xfile_clear_err(xfile_t * file) {
 }
 
 /**
+ * 缺省初始化driitem
+ * @param dir_item 待初始化的diritem
+ * @param is_dir 该项是否对应目录项
+ * @param name 项的名称
+ * @param cluster 数据簇的起始簇号
+ * @return
+ */
+static xfat_err_t diritem_init_default(diritem_t * dir_item, xdisk_t * disk, u8_t is_dir, const char * name, u32_t cluster) {
+    xfile_time_t timeinfo;
+
+    xfat_err_t err = xdisk_curr_time(disk, &timeinfo);
+    if (err < 0) {
+        return err;
+    }
+
+    to_sfn((char *)dir_item->DIR_Name, name);
+    set_diritem_cluster(dir_item, cluster);
+    dir_item->DIR_FileSize = 0;
+    dir_item->DIR_Attr = (u8_t)(is_dir ? DIRITEM_ATTR_DIRECTORY : 0);
+    dir_item->DIR_NTRes = get_sfn_case_cfg(name);
+
+    dir_item->DIR_CrtTime.hour = timeinfo.hour;
+    dir_item->DIR_CrtTime.minute = timeinfo.minute;
+    dir_item->DIR_CrtTime.second_2 = (u16_t)(timeinfo.second / 2);
+    dir_item->DIR_CrtTimeTeenth = (u8_t)((timeinfo.second & 1) * 1000);
+
+    dir_item->DIR_CrtDate.year_from_1980 = (u16_t)(timeinfo.year - 1980);
+    dir_item->DIR_CrtDate.month = timeinfo.month;
+    dir_item->DIR_CrtDate.day = timeinfo.day;
+
+    dir_item->DIR_WrtTime = dir_item->DIR_CrtTime;
+    dir_item->DIR_WrtDate = dir_item->DIR_CrtDate;
+    dir_item->DIR_LastAccDate = dir_item->DIR_CrtDate;
+
+    return FS_ERR_OK;
+}
+
+/**
  * 在指定目录下创建子文件或者目录
  * @param xfat xfat结构
  * @param is_dir 要创建的是文件还是目录
@@ -1806,7 +1940,7 @@ static xfat_err_t create_sub_file (xfat_t * xfat, u8_t is_dir, u32_t parent_clus
     } while (1);
 
     // 如果是目录且不为dot file， 预先分配目录项空间
-    if (is_dir && xlib_strncmp(".", child_name, 1) && xlib_strncmp("..", child_name, 2)) {
+    if (is_dir && strncmp(".", child_name, 1) && strncmp("..", child_name, 2)) {
         u32_t cluster_count;
 
         err = allocate_free_cluster(xfat, CLUSTER_INVALID, 1, &file_first_cluster, &cluster_count, 1, 0);
@@ -1861,7 +1995,7 @@ static xfat_err_t create_sub_file (xfat_t * xfat, u8_t is_dir, u32_t parent_clus
     }
 
     // 写入所在目录项
-    err = xfat_bpool_write_sector(to_obj(xfat), buf, 0);
+    err = xfat_bpool_write_sector(to_obj(xfat), buf);
     if (err < 0) {
         return err;
     }
@@ -2085,7 +2219,7 @@ xfile_size_t xfile_read(void * buffer, xfile_size_t elem_size, xfile_size_t coun
                 return 0;
             }
 
-            xlib_memcpy(read_buffer, buf->buf + sector_offset, curr_read_bytes);
+            memcpy(read_buffer, buf->buf + sector_offset, curr_read_bytes);
 
             read_buffer += curr_read_bytes;
             bytes_to_read -= curr_read_bytes;
@@ -2153,7 +2287,7 @@ static xfat_err_t update_file_size(xfile_t * file, xfile_size_t size) {
     // 注意更新簇号，因初始文件创建时分配的簇可能并不有效，需要重新设置
     set_diritem_cluster(dir_item, file->start_cluster);
  
-    err = xfat_bpool_write_sector(to_obj(file), buf, 0);
+    err = xfat_bpool_write_sector(to_obj(file), buf);
     if (err < 0) {
         file->err = err;
         return err;
@@ -2300,8 +2434,8 @@ xfile_size_t xfile_write(void * buffer, xfile_size_t elem_size, xfile_size_t cou
                 return 0;
             }
 
-            xlib_memcpy(buf->buf + sector_offset, write_buffer, curr_write_bytes);
-            err = xfat_bpool_write_sector(to_obj(file), buf, 0);
+            memcpy(buf->buf + sector_offset, write_buffer, curr_write_bytes);
+            err = xfat_bpool_write_sector(to_obj(file), buf);
             if (err < 0) {
                 file->err = err;
                 return 0;
@@ -2586,7 +2720,7 @@ xfat_err_t xfile_rename(const char* path, const char* new_name) {
         diritem->DIR_NTRes &= ~DIRITEM_NTRES_CASE_MASK;
         diritem->DIR_NTRes |= get_sfn_case_cfg(new_name);
 
-        return  xfat_bpool_write_sector(to_obj(xfat), buf, 0);
+        return  xfat_bpool_write_sector(to_obj(xfat), buf);
     }
 
     return FS_ERR_OK;
@@ -2665,7 +2799,7 @@ static xfat_err_t set_file_time (xfat_t *xfat, const char * path, stime_type_t t
                 break;
         }
 
-        return xfat_bpool_write_sector(to_obj(xfat), buf, 0);
+        return xfat_bpool_write_sector(to_obj(xfat), buf);
     }
 
     return FS_ERR_OK;
@@ -2802,7 +2936,7 @@ xfat_err_t xfile_rmfile(const char * path) {
         u32_t dir_sector = to_phy_sector(xfat, found_cluster, found_offset);
 
         diritem->DIR_Name[0] = DIRITEM_NAME_FREE;
-        err = xfat_bpool_write_sector(to_obj(xfat), buf, 0);
+        err = xfat_bpool_write_sector(to_obj(xfat), buf);
         if (err < 0) return err;
 
         err = destroy_cluster_chain(xfat, get_diritem_cluster(diritem));
@@ -2925,7 +3059,7 @@ xfat_err_t xfile_rmdir (const char * path) {
         diritem = (diritem_t*)(buf->buf + to_sector_offset(xfat_get_disk(xfat), found_offset));
         diritem->DIR_Name[0] = DIRITEM_NAME_FREE;
 
-        err = xfat_bpool_write_sector(to_obj(xfat), buf, 0);
+        err = xfat_bpool_write_sector(to_obj(xfat), buf);
         if (err < 0) {
             return err;
         }
@@ -2972,7 +3106,7 @@ static xfat_err_t rmdir_all_children(xfat_t* xfat, u32_t parent_cluster) {
             u32_t dir_sector = to_phy_sector(xfat, found_cluster, found_offset);
 
             diritem->DIR_Name[0] = DIRITEM_NAME_FREE;
-            err = xfat_bpool_write_sector(to_obj(xfat), buf, 0);
+            err = xfat_bpool_write_sector(to_obj(xfat), buf);
             if (err < 0) return err;
 
             if (get_file_type(diritem) == FAT_DIR) {
@@ -3055,7 +3189,7 @@ xfat_err_t xfile_rmdir_tree(const char* path) {
 
         dir_sector = to_phy_sector(xfat, found_cluster, found_offset);
         diritem->DIR_Name[0] = DIRITEM_NAME_FREE;
-        err = xfat_bpool_write_sector(to_obj(xfat), buf, 0);
+        err = xfat_bpool_write_sector(to_obj(xfat), buf);
         if (err < 0) return err;
 
         err = rmdir_all_children(xfat, diritem_cluster);

@@ -16,7 +16,8 @@
  */
 typedef enum {
 	FS_NOT_VALID = 0x00,            // 无效类型
-	FS_FAT32 = 0x01,                // FAT32
+	FS_FAT12 = 0x01,
+	FS_FAT16 = 0x6,
     FS_EXTEND = 0x05,               // 扩展分区
     FS_WIN95_FAT32_0 = 0xB,         // FAT32
     FS_WIN95_FAT32_1 = 0xC,         // FAT32

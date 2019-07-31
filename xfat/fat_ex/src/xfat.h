@@ -10,7 +10,6 @@
 #include "xtypes.h"
 #include "xdisk.h"
 #include "xfat_obj.h"
-#include "xlib.h"
 
 #pragma pack(1)
 
@@ -33,6 +32,18 @@ typedef struct _bpb_t {
     u32_t BPB_HiddSec;                  // 隐藏扇区数
     u32_t BPB_TotSec32;                 // 总的扇区数
 } bpb_t;
+
+/**
+ * BPB中的FAT12/16结构
+ */
+typedef struct _fat12_16_hdr_t {
+    u8_t BS_DrvNum;                     // 设备号
+    u8_t BS_Reserved1;
+    u8_t BS_BootSig;                    // 扩展标记
+    u32_t BS_VolID;                     // 卷序列号
+    u8_t BS_VolLab[11];                 // 卷标名称
+    u8_t BS_FileSysType[8];             // 文件类型名称
+}fat12_16_hdr_t;
 
 /**
  * BPB中的FAT32结构
@@ -58,7 +69,10 @@ typedef struct _fat32_hdr_t {
  */
 typedef struct _dbr_t {
     bpb_t bpb;                          // BPB结构
-    fat32_hdr_t fat32;                  // FAT32结构
+    union {
+        fat12_16_hdr_t fat12_16;        // FAT12/16结构
+        fat32_hdr_t fat32;              // FAT32结构
+    }fat; 
 } dbr_t;
 
 #define CLUSTER_INVALID                 0x0FFFFFFF          // 无效的簇号
@@ -108,7 +122,8 @@ typedef struct _diritem_time_t {
  * FAT目录项
  */
 typedef struct _diritem_t {
-    u8_t DIR_Name[11];                  // 8+3文件名
+    u8_t DIR_Name[8];                   // 文件名
+    u8_t DIR_ExtName[3];                // 扩展名
     u8_t DIR_Attr;                      // 属性
     u8_t DIR_NTRes;
     u8_t DIR_CrtTimeTeenth;             // 创建时间的毫秒
@@ -125,6 +140,13 @@ typedef struct _diritem_t {
 /**
  * 簇类型
  */
+typedef union _cluster16_t {
+    struct {
+        u16_t next; 
+    } s;
+    u16_t v;
+}cluster16_t;
+
 typedef union _cluster32_t {
     struct {
         u32_t next : 28;                // 下一簇
@@ -132,6 +154,10 @@ typedef union _cluster32_t {
     } s;
     u32_t v;
 } cluster32_t;
+
+#define FSI_LOAD_SIG                    0x41615252
+#define FSI_STRUC_SIG                   0x61417272
+#define FSI_TRAIL_SIG                   0xAA550000
 
 /**
  * FSInfo结构
@@ -149,6 +175,14 @@ typedef struct _fsinto_t {
 #pragma pack()
 
 #define XFAT_NAME_LEN       16
+
+typedef struct _xfat_feature_t {
+    union {
+        u32_t en_fsinfo : 1;
+    }s;
+
+    u32_t v;
+}xfat_feature_t;
 
 /**
  * xfat结构
@@ -172,6 +206,7 @@ typedef struct _xfat_t {
 
     xdisk_part_t * disk_part;           // 对应的分区信息
 
+    xfat_feature_t feature;             // 文件系统支持的特性
     xfat_bpool_t bpool;                 // FAT缓存：用于非文件数据的访问
 
     struct _xfat_t* next;
@@ -279,6 +314,7 @@ typedef enum _xcluster_size_t {
 
     XFAT_CLUSTER_AUTO,              // 内部自动选择
 }xcluster_size_t;
+
 typedef struct _xfat_fmt_ctrl_t {
     xfs_type_t type;                // 文件系统类型
     xcluster_size_t cluster_size;
